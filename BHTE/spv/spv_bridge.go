@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/big"
+	"strings"
 	"sync"
 	"time"
 
@@ -23,6 +24,8 @@ const (
 	SPVHeaderCacheSize = 10000
 	SPVProofValidDays = 7
 	MaxHeaderBatchSize = 2000
+	MaxMerkleProofHashes = 1024
+	DefaultMinConfirmations = 3
 )
 
 type BHCSPVClient struct {
@@ -103,16 +106,25 @@ func (c *BHCSPVClient) Stop() {
 }
 
 func (c *BHCSPVClient) GetLatestHeight() (uint64, error) {
-	var result struct {
-		Height uint64 `json:"height"`
-	}
+	var result uint64
 
 	err := c.rpcClient.CallFor(c.ctx, &result, "getblockcount")
 	if err != nil {
 		return 0, fmt.Errorf("failed to get block count: %w", err)
 	}
 
-	return result.Height, nil
+	return result, nil
+}
+
+func (c *BHCSPVClient) GetBlockHash(height uint64) (string, error) {
+	var hash string
+	if err := c.rpcClient.CallFor(c.ctx, &hash, "getblockhash", height); err != nil {
+		return "", fmt.Errorf("failed to get block hash at height %d: %w", height, err)
+	}
+	if hash == "" {
+		return "", fmt.Errorf("empty block hash at height %d", height)
+	}
+	return hash, nil
 }
 
 func (c *BHCSPVClient) GetBlockHeader(height uint64) (*BHCHeader, error) {
@@ -124,9 +136,25 @@ func (c *BHCSPVClient) GetBlockHeader(height uint64) (*BHCHeader, error) {
 	c.mu.RUnlock()
 
 	var header BHCHeader
-	err := c.rpcClient.CallFor(c.ctx, &header, "getblockheader", height)
+	blockHash, hashErr := c.GetBlockHash(height)
+	err := hashErr
+	if hashErr == nil {
+		err = c.rpcClient.CallFor(c.ctx, &header, "getblockheader", blockHash, true)
+		if err != nil {
+			err = c.rpcClient.CallFor(c.ctx, &header, "getblockheader", blockHash)
+		}
+	}
+	if err != nil {
+		err = c.rpcClient.CallFor(c.ctx, &header, "getblockheader", height)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to get block header: %w", err)
+	}
+	if header.Hash == "" && blockHash != "" {
+		header.Hash = blockHash
+	}
+	if header.Height == 0 {
+		header.Height = height
 	}
 
 	c.mu.Lock()
@@ -150,9 +178,15 @@ func (c *BHCSPVClient) GetBlockHeaderByHash(hash string) (*BHCHeader, error) {
 	c.mu.RUnlock()
 
 	var header BHCHeader
-	err := c.rpcClient.CallFor(c.ctx, &header, "getblockheader", hash)
+	err := c.rpcClient.CallFor(c.ctx, &header, "getblockheader", hash, true)
+	if err != nil {
+		err = c.rpcClient.CallFor(c.ctx, &header, "getblockheader", hash)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to get block header: %w", err)
+	}
+	if header.Hash == "" {
+		header.Hash = hash
 	}
 
 	c.mu.Lock()
@@ -211,22 +245,33 @@ func (c *BHCSPVClient) VerifyHeaderChain(headers []*BHCHeader) (bool, error) {
 }
 
 func (c *BHCSPVClient) verifyProofOfWork(header *BHCHeader) bool {
-	targetDifficulty := c.decodeBits(header.Bits)
+	target := c.decodeBits(header.Bits)
+	if target.Sign() <= 0 {
+		return false
+	}
 
-	headerHash := common.HexToHash(header.Hash)
-	headerNum := new(big.Int).SetBytes(headerHash.Bytes())
+	// header.Hash is in display (big-endian) order, which equals the numeric
+	// value of the proof-of-work hash. Reject malformed hashes.
+	raw, err := hex.DecodeString(header.Hash)
+	if err != nil || len(raw) != 32 {
+		return false
+	}
+	headerNum := new(big.Int).SetBytes(raw)
 
-	return headerNum.Cmp(targetDifficulty) <= 0
+	return headerNum.Cmp(target) <= 0
 }
 
+// decodeBits converts a Bitcoin-style compact "nBits" encoding into the full
+// 256-bit target: target = mantissa * 256^(exponent-3).
 func (c *BHCSPVClient) decodeBits(bits uint32) *big.Int {
-	exponent := uint(bits >> 24)
-	mantissa := bits & 0x007FFFFF
+	exponent := bits >> 24
+	mantissa := big.NewInt(int64(bits & 0x007FFFFF))
 
-	limit := new(big.Int).Lsh(big.NewInt(1), 256-exponent)
-	result := new(big.Int).Mul(big.NewInt(int64(mantissa)), limit)
-
-	return result
+	// The 0x00800000 sign bit is never set for valid targets; treat as positive.
+	if exponent <= 3 {
+		return new(big.Int).Rsh(mantissa, uint(8*(3-exponent)))
+	}
+	return new(big.Int).Lsh(mantissa, uint(8*(exponent-3)))
 }
 
 func (c *BHCSPVClient) GenerateHeaderProof(startHeight, endHeight uint64) (*SPVProof, error) {
@@ -258,34 +303,73 @@ func (c *BHCSPVClient) GenerateHeaderProof(startHeight, endHeight uint64) (*SPVP
 
 func (c *BHCSPVClient) GetMerkleProof(txHash string, blockHeight uint64) (*MerkleProof, error) {
 	var result struct {
-		BlockHash   string   `json:"block_hash"`
-		Proof       []string `json:"proof"`
-		ProofFlags  []bool   `json:"flags"`
-		Transaction string   `json:"tx"`
+		BlockHash      string   `json:"block_hash"`
+		BlockHashAlt   string   `json:"blockhash"`
+		Proof          []string `json:"proof"`
+		MerkleBranch   []string `json:"merkle_branch"`
+		ProofFlags     []bool   `json:"flags"`
+		ProofFlagsAlt  []bool   `json:"proof_flags"`
+		Transaction    string   `json:"tx"`
+		TransactionAlt string   `json:"transaction"`
+		TxID           string   `json:"txid"`
 	}
 
-	err := c.rpcClient.CallFor(c.ctx, &result, "gettxoutproof", []string{txHash}, blockHeight)
+	blockHash, hashErr := c.GetBlockHash(blockHeight)
+	err := hashErr
+	if hashErr == nil {
+		err = c.rpcClient.CallFor(c.ctx, &result, "gettxoutproof", []string{txHash}, blockHash)
+	}
+	if err != nil {
+		err = c.rpcClient.CallFor(c.ctx, &result, "gettxoutproof", []string{txHash}, blockHeight)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to get merkle proof: %w", err)
 	}
 
-	txResult := ""
-	if len(result.Proof) > 0 {
-		txResult = result.Proof[0]
+	if result.BlockHash != "" {
+		blockHash = result.BlockHash
+	}
+	if result.BlockHashAlt != "" {
+		blockHash = result.BlockHashAlt
+	}
+
+	proofHashes := result.Proof
+	if len(proofHashes) == 0 {
+		proofHashes = result.MerkleBranch
+	}
+	proofFlags := result.ProofFlags
+	if len(proofFlags) == 0 {
+		proofFlags = result.ProofFlagsAlt
+	}
+	txResult := txHash
+	if result.Transaction != "" {
+		txResult = result.Transaction
+	}
+	if result.TransactionAlt != "" {
+		txResult = result.TransactionAlt
+	}
+	if result.TxID != "" {
+		txResult = result.TxID
 	}
 
 	return &MerkleProof{
-		BlockHash:    result.BlockHash,
+		BlockHash:    blockHash,
 		Transaction:  txResult,
-		ProofHashes:  result.Proof,
-		ProofFlags:   result.ProofFlags,
+		ProofHashes:  proofHashes,
+		ProofFlags:   proofFlags,
 		HeaderHeight: blockHeight,
 	}, nil
 }
 
 func (c *BHCSPVClient) VerifyMerkleProof(proof *MerkleProof) (bool, error) {
+	if proof == nil {
+		return false, fmt.Errorf("nil merkle proof")
+	}
 	if len(proof.ProofHashes) == 0 && proof.Transaction == "" {
 		return false, fmt.Errorf("empty merkle proof")
+	}
+	if len(proof.ProofHashes) > MaxMerkleProofHashes {
+		return false, fmt.Errorf("merkle proof too large: %d hashes", len(proof.ProofHashes))
 	}
 
 	if proof.BlockHash == "" {
@@ -301,71 +385,108 @@ func (c *BHCSPVClient) VerifyMerkleProof(proof *MerkleProof) (bool, error) {
 		return false, fmt.Errorf("block hash mismatch")
 	}
 
-	txHash := proof.Transaction
-	if txHash == "" && len(proof.ProofHashes) > 0 {
-		txHash = proof.ProofHashes[0]
+	if proof.Transaction == "" {
+		return false, fmt.Errorf("missing transaction id")
 	}
 
-	computedMerkle, err := c.computeMerkleRoot(proof.ProofHashes, proof.ProofFlags, txHash)
+	computedMerkle, err := c.computeMerkleRoot(proof.Transaction, proof.ProofHashes, proof.ProofFlags)
 	if err != nil {
 		return false, fmt.Errorf("failed to compute merkle root: %w", err)
 	}
 
-	if computedMerkle != header.MerkleRoot {
+	if !strings.EqualFold(computedMerkle, header.MerkleRoot) {
 		return false, fmt.Errorf("merkle root mismatch: computed %s, header %s", computedMerkle, header.MerkleRoot)
 	}
 
 	return true, nil
 }
 
-func (c *BHCSPVClient) computeMerkleRoot(proofHashes []string, proofFlags []bool, txHash string) (string, error) {
-	if len(proofHashes) == 0 && txHash == "" {
-		return "", fmt.Errorf("empty merkle proof")
+func (c *BHCSPVClient) VerifyTransactionProof(txHash string, blockHeight uint64, minConfirmations uint64) (bool, error) {
+	if txHash == "" {
+		return false, fmt.Errorf("missing transaction hash")
+	}
+	if minConfirmations == 0 {
+		minConfirmations = DefaultMinConfirmations
 	}
 
-	if txHash == "" && len(proofHashes) > 0 {
-		txHash = proofHashes[0]
+	latestHeight, err := c.GetLatestHeight()
+	if err != nil {
+		return false, err
+	}
+	if latestHeight < blockHeight {
+		return false, fmt.Errorf("block height %d is above latest height %d", blockHeight, latestHeight)
+	}
+	confirmations := latestHeight - blockHeight + 1
+	if confirmations < minConfirmations {
+		return false, fmt.Errorf("insufficient confirmations: have %d, need %d", confirmations, minConfirmations)
 	}
 
-	hashes := []string{txHash}
-
-	for i := 0; i < len(proofHashes) && i < len(proofFlags); i++ {
-		var left, right string
-
-		if proofFlags[i] {
-			left = hashes[len(hashes)-1]
-			right = proofHashes[i]
-		} else {
-			if len(hashes) > 1 {
-				left = hashes[len(hashes)-1]
-				hashes = hashes[:len(hashes)-1]
-			} else {
-				left = hashes[0]
-			}
-
-			if i < len(proofHashes) {
-				right = proofHashes[i]
-			} else {
-				right = left
-			}
-		}
-
-		combined := left + right
-		newHash := c.sha256d(combined)
-		hashes = append(hashes, newHash)
+	proof, err := c.GetMerkleProof(txHash, blockHeight)
+	if err != nil {
+		return false, err
 	}
 
-	if len(hashes) == 0 {
-		return "", fmt.Errorf("failed to compute merkle root")
-	}
-
-	return hashes[len(hashes)-1], nil
+	return c.VerifyMerkleProof(proof)
 }
 
-func (c *BHCSPVClient) sha256d(input string) string {
-	h1 := sha256.Sum256([]byte(input))
+// computeMerkleRoot folds a Bitcoin-style merkle branch from a leaf (txHash) up
+// to the root. All hashes are hex in display (reversed) byte order; folding is
+// performed in internal byte order using double-SHA256, and the result is
+// returned in display order so it can be compared with a block's merkleroot.
+//
+// proofFlags[i] == true means the sibling at level i is the right node (the
+// running hash is the left child); false means the sibling is the left node.
+func (c *BHCSPVClient) computeMerkleRoot(txHash string, proofHashes []string, proofFlags []bool) (string, error) {
+	if len(proofHashes) != len(proofFlags) {
+		return "", fmt.Errorf("proof hashes/flags length mismatch")
+	}
+
+	cur, err := decodeReversed(txHash)
+	if err != nil {
+		return "", fmt.Errorf("invalid transaction id: %w", err)
+	}
+
+	for i, sibHex := range proofHashes {
+		sib, err := decodeReversed(sibHex)
+		if err != nil {
+			return "", fmt.Errorf("invalid proof hash %d: %w", i, err)
+		}
+		if proofFlags[i] {
+			cur = sha256d(append(append([]byte{}, cur...), sib...)) // H(cur || sib)
+		} else {
+			cur = sha256d(append(append([]byte{}, sib...), cur...)) // H(sib || cur)
+		}
+	}
+
+	return encodeReversed(cur), nil
+}
+
+// sha256d returns the double SHA-256 of the input bytes.
+func sha256d(input []byte) []byte {
+	h1 := sha256.Sum256(input)
 	h2 := sha256.Sum256(h1[:])
-	return hex.EncodeToString(h2[:])
+	return h2[:]
+}
+
+// decodeReversed decodes a display-order hex hash into internal byte order.
+func decodeReversed(s string) ([]byte, error) {
+	b, err := hex.DecodeString(s)
+	if err != nil {
+		return nil, err
+	}
+	for i, j := 0, len(b)-1; i < j; i, j = i+1, j-1 {
+		b[i], b[j] = b[j], b[i]
+	}
+	return b, nil
+}
+
+// encodeReversed encodes internal byte order back to display-order hex.
+func encodeReversed(b []byte) string {
+	r := make([]byte, len(b))
+	for i := range b {
+		r[i] = b[len(b)-1-i]
+	}
+	return hex.EncodeToString(r)
 }
 
 func (c *BHCSPVClient) GetAddressProof(address string, minHeight uint64) (*AddressProof, error) {

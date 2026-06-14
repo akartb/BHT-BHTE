@@ -25,6 +25,7 @@ Thumbs.db
 Desktop.ini
 
 # Local dependency/vendor caches
+**/node_modules/
 vcpkg/
 bitcoin-core-src/
 bitcoin-gui-src/
