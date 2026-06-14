@@ -1,0 +1,124 @@
+# BHC Makefile.am 补丁
+# 将此内容合并到 bitcoin-master/src/Makefile.am 中
+
+# ============================================================
+# 1. 加密库部分 - 添加 ProgPoW 和 ML-DSA
+# ============================================================
+
+# 在 libbitcoin_crypto_base_a_SOURCES 中添加：
+libbitcoin_crypto_base_a_SOURCES = \
+    crypto/progpow.cpp \
+    crypto/progpow.h \
+    crypto/mldsa.cpp \
+    crypto/mldsa.h \
+    crypto/sha256.cpp \
+    crypto/sha256.h \
+    crypto/ripemd160.cpp \
+    crypto/ripemd160.h \
+    crypto/aes.cpp \
+    crypto/aes.h \
+    crypto/chacha20.cpp \
+    crypto/chacha20.h \
+    crypto/hmac_sha256.cpp \
+    crypto/hmac_sha256.h \
+    crypto/hmac_sha512.cpp \
+    crypto/hmac_sha512.h \
+    crypto/sha1.cpp \
+    crypto/sha1.h \
+    crypto/sha512.cpp \
+    crypto/sha512.h \
+    crypto/siphash.cpp \
+    crypto/siphash.h
+
+# ============================================================
+# 2. 公共库部分 - 添加 PoW 和混合签名逻辑
+# ============================================================
+
+# 在 libbitcoin_common_a_SOURCES 中添加：
+libbitcoin_common_a_SOURCES = \
+    pow.cpp \
+    pow.h \
+    chainparams.cpp \
+    chainparams.h \
+    script/hybrid_sig.cpp \
+    script/hybrid_sig.h \
+    $(BITCOIN_CORE_H)
+
+# ============================================================
+# 3. 编译标志
+# ============================================================
+
+# 添加 C++20 支持
+AM_CXXFLAGS = $(CXXFLAGS) -std=c++20
+
+# 添加包含路径
+BITCOIN_INCLUDES = \
+    -I$(srcdir) \
+    -I$(srcdir)/crypto \
+    -I$(srcdir)/script \
+    -I$(srcdir)/secp256k1/include
+
+# ============================================================
+# 4. 链接库
+# ============================================================
+
+# 如果使用 PQClean 外部库
+# BITCOIN_INCLUDES += -I$(srcdir)/crypto/pqclean
+# LIBBITCOIN_CRYPTO += $(LIBPQCLEAN)
+
+# ============================================================
+# 5. 测试文件
+# ============================================================
+
+# 在 test_test_bitcoin_SOURCES 中添加：
+test_test_bitcoin_SOURCES = \
+    test/crypto_tests.cpp \
+    test/mldsa_tests.cpp \
+    test/progpow_tests.cpp
+
+# ============================================================
+# 6. 工具程序
+# ============================================================
+
+# 创世块生成工具
+bin_PROGRAMS += bhc_genesis
+
+bhc_genesis_SOURCES = tools/genesis_generator.cpp
+bhc_genesis_LDADD = libbitcoin_crypto_base.a
+
+# ============================================================
+# 7. 安装配置
+# ============================================================
+
+# 配置文件安装
+bitcoind_install_dirs = \
+    $(DESTDIR)$(bindir) \
+    $(DESTDIR)$(sysconfdir)/bhc
+
+# ============================================================
+# 8. 条件编译
+# ============================================================
+
+# 如果启用 ProgPoW
+if USE_PROGPOW
+AM_CXXFLAGS += -DUSE_PROGPOW
+endif
+
+# 如果启用 ML-DSA
+if USE_MLDSA
+AM_CXXFLAGS += -DUSE_MLDSA
+endif
+
+# ============================================================
+# 9. 清理规则
+# ============================================================
+
+CLEANFILES = \
+    *.gcda \
+    *.gcno \
+    *.gcov
+
+DISTCLEANFILES = \
+    Makefile \
+    config.h \
+    config.status

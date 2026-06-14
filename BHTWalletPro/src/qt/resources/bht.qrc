@@ -1,0 +1,45 @@
+<RCC>
+    <qresource prefix="/icons">
+        <file>res/icons/bitcoin.png</file>
+        <file>res/icons/bht.png</file>
+        <file>res/icons/add.png</file>
+        <file>res/icons/address-book.png</file>
+        <file>res/icons/chevron.png</file>
+        <file>res/icons/clock1.png</file>
+        <file>res/icons/clock2.png</file>
+        <file>res/icons/clock3.png</file>
+        <file>res/icons/clock4.png</file>
+        <file>res/icons/clock5.png</file>
+        <file>res/icons/connect0.png</file>
+        <file>res/icons/connect1.png</file>
+        <file>res/icons/connect2.png</file>
+        <file>res/icons/connect3.png</file>
+        <file>res/icons/connect4.png</file>
+        <file>res/icons/edit.png</file>
+        <file>res/icons/editcopy.png</file>
+        <file>res/icons/editpaste.png</file>
+        <file>res/icons/export.png</file>
+        <file>res/icons/eye.png</file>
+        <file>res/icons/eye_minus.png</file>
+        <file>res/icons/eye_plus.png</file>
+        <file>res/icons/history.png</file>
+        <file>res/icons/lock_closed.png</file>
+        <file>res/icons/lock_open.png</file>
+        <file>res/icons/overview.png</file>
+        <file>res/icons/receive.png</file>
+        <file>res/icons/remove.png</file>
+        <file>res/icons/send.png</file>
+        <file>res/icons/synced.png</file>
+        <file>res/icons/transaction0.png</file>
+        <file>res/icons/transaction2.png</file>
+        <file>res/icons/tx_inout.png</file>
+        <file>res/icons/tx_input.png</file>
+        <file>res/icons/tx_mined.png</file>
+        <file>res/icons/tx_output.png</file>
+        <file>res/icons/verify.png</file>
+        <file>res/icons/warning.png</file>
+    </qresource>
+    <qresource prefix="/fonts">
+        <file>res/fonts/RobotoMono-Bold.ttf</file>
+    </qresource>
+</RCC>

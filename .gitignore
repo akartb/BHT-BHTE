@@ -1,0 +1,54 @@
+# Build outputs
+**/build/
+**/build_test/
+**/build_vs/
+**/build_vs2/
+**/build_msvc/
+**/.testbin/
+**/bin/
+**/obj/
+*.obj
+*.pdb
+*.ilk
+*.exe
+*.dll
+*.lib
+*.exp
+
+# Local IDE and OS files
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+Thumbs.db
+Desktop.ini
+
+# Local dependency/vendor caches
+vcpkg/
+bitcoin-core-src/
+bitcoin-gui-src/
+bitcoin-master/
+go-ethereum-master/
+
+# Local runtime/cache data
+.gotmp/
+aqtinstall.log
+*.log
+bhte_state.json
+bhte_trie_nodes.json
+wallet.dat
+
+# Qt generated files
+*_autogen/
+moc_*.cpp
+qrc_*.cpp
+ui_*.h
+
+# Archives
+*.zip
+*.7z
+*.tar
+*.tar.gz
+
+.nested-git-backups/

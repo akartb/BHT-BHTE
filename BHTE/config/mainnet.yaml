@@ -1,0 +1,58 @@
+# Copyright (c) 2026 BHC Developers
+# Distributed under the MIT software license
+# BHTE Mainnet Configuration
+
+NetworkID: 0x42485445
+ChainID: 5757
+
+BHCNodeURL: "http://127.0.0.1:8334"
+BHCRPCUser: "bhcuser"
+BHCRPCPassword: "bhcpassword"
+
+AuxPoWEnabled: true
+AuxPoWCheckInterval: "10m"
+MinBHCConfirmations: 6
+
+AnchorEnabled: true
+AnchorCheckInterval: "10m"
+AnchorConfirmations: 6
+ChallengePeriod: "168h"
+
+RPCEnabled: true
+RPCPort: 8545
+RPCAPI: ["eth", "web3", "net", "debug"]
+
+WSEnabled: true
+WSPort: 8546
+WSAPI: ["eth", "web3", "net"]
+
+GPO:
+  Blocks: 20
+  Percentile: 60
+  MaxHeaderHistory: 1024
+  MaxBlockHistory: 256
+  MaxPrice: 100000000000
+
+VM:
+  Type: "bhte"
+  EnablePruning: true
+  KernelOpcodes: ["KERNEL_TRANSFER", "KERNEL_MLDSA", "KERNEL_ANCHOR", "KERNEL_MULTISIG"]
+  DisabledOpcodes: ["CREATE", "CREATE2", "SELFDESTRUCT", "REVERT", "LOG0", "LOG1", "LOG2", "LOG3", "LOG4"]
+
+MLDSA:
+  Enabled: true
+  Level: "Level3"
+  PrecompileAddress: "0x0000000000000000000000000000000000000100"
+
+ChannelNetwork:
+  Enabled: true
+  MaxHops: 5
+  MinChannelCapacity: 1000000
+  HTLCTimeout: "24h"
+
+SPV:
+  Enabled: true
+  HeaderCacheSize: 10000
+  SyncInterval: "10m"
+
+LogLevel: "INFO"
