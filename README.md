@@ -1,6 +1,6 @@
 # BHC + BHTE Project Status
 
-Last verified: 2026-06-13
+Last verified: 2026-06-14
 
 ## Overview
 
@@ -27,8 +27,8 @@ cd D:\work0\BHT\BHC
 Observed result:
 
 - ProgPoW hash calculation succeeds.
-- ML-DSA signing and verification succeeds.
-- Performance smoke result was about 338k ProgPoW hashes/sec and 19 microseconds per ML-DSA sign+verify cycle in the current environment.
+- The standalone ML-DSA smoke path signs and verifies, but it is still the simplified standalone fallback, not production FIPS 204 validation.
+- A current run completed successfully in this environment.
 
 ### BHTE
 
@@ -41,8 +41,8 @@ cd D:\work0\BHT\BHTE
 
 Why the script exists:
 
-- `go test ./...` currently passes most packages but fails to execute generated test binaries for `bhte/mldsa` and `bhte/test` from Go's deep temporary build path with `Access is denied` on this Windows machine.
-- The same packages pass when the test binaries are emitted to a stable project path with `go test -o`.
+- `go test ./...` currently passes most packages but can fail to execute generated test binaries from Go's deep temporary build path with `Access is denied` on this Windows machine.
+- The script compiles each package that has tests with `go test -c -o .testbin/...` and then executes the stable test binary.
 
 Key fixes made:
 
@@ -93,14 +93,16 @@ Recent UI/functionality expansion:
 - The BHTE zkEVM ML-DSA precompile (`BHTE/core/vm/contracts_mldsa.go`) now performs real ML-DSA-65 verification through the `mldsa` package instead of the previous 4-byte magic-prefix check.
 - The BHTE SPV bridge (`BHTE/spv/spv_bridge.go`) now uses correct cryptography: the compact `nBits` target decode follows the Bitcoin formula, and Merkle proofs are verified over raw little-endian bytes with double-SHA256 (previously it concatenated ASCII hex and used a wrong target formula). Unit tests cover these without a live node.
 - The Solidity settlement contract (`BHTE/contracts/BHTEsettlement.sol`) now compiles (it previously contained HTML-escaped `=>` and a wrong OpenZeppelin v5 import path) and performs **native on-chain ML-DSA verification** via the zkEVM precompile at `0x...0100`, with the owner-managed commitment retained only as an explicit fallback for stock EVMs. Anchor submission is gated by a real multi-validator ECDSA proof check instead of `return true`. Verified to compile with solc 0.8.24 + OpenZeppelin 5.0.2.
-- BHC's C++ ML-DSA still has two paths: a real liboqs-backed path (`USE_MLDSA`) and a non-liboqs fallback that is NOT real ML-DSA. Builds without liboqs (e.g. `standalone_test.exe`) use the fallback. **(Not yet addressed.)**
+- BHC's C++ ML-DSA still has two paths: a real liboqs-backed path (`USE_MLDSA`) and a non-liboqs fallback that is NOT real ML-DSA. A complete pure-C++ FIPS 204 ML-DSA (Keccak/SHAKE + keygen/sign/verify, ported from the verified Go implementation) now exists as `BHC/tools/mldsa_fips204_selftest.cpp` and compiles cleanly under MSVC, but it has not yet replaced the fallback in `src/crypto/mldsa.cpp`: this machine's antivirus blocks or removes freshly built crypto executables, so the post-fix self-test cannot be re-run here. Rechecked on 2026-06-14 with `D:\11` MSVC: compilation produced `.testbin/mldsa_selftest.exe`, then execution failed with `Access is denied`. Integrate it only after re-running the self-test on a host with an AV exclusion, and reconcile sizes to FIPS 204 (ML-DSA-65 = 3309, ML-DSA-87 = 4627).
+- `BHC/tools/standalone_test.cpp` was fixed to compile on stock MSVC: the non-portable `unsigned __int256` proof-of-work check was replaced with a correct, portable compact-target comparison. Verified: it compiles and runs (`ProgPoW` + ML-DSA-stub smoke pass).
 - `go test ./...` still hits a Windows temporary-executable permission issue for two packages; use `BHTE/run_tests.ps1` for now.
 - `BHTWalletPro` has a build artifact and startup smoke pass, but still needs interactive GUI workflow testing.
 
 ## Recommended Next Steps
 
-1. Run `BHTE/run_tests.ps1` in CI or a clean Windows shell and preserve the output.
-2. Add focused tests for BHTE state channels, AuxPoW, SPV bridge, and settlement contract behavior.
-3. Exercise BHTWalletPro manually: create/open wallet, send dialog validation, receive address generation, transaction history, Layer 2 connection settings.
-4. Replace prototype ML-DSA fallback code with liboqs-backed production verification before mainnet.
-5. Run an external security audit before any public deployment.
+1. Re-run `BHC/tools/mldsa_fips204_selftest.cpp` on a host with an antivirus exclusion, then wire the verified implementation into `BHC/src/crypto/mldsa.cpp` and `BHTWalletPro/src/crypto/mldsa_signer.cpp`.
+2. Run NIST ACVP/KAT vectors against both Go and C++ ML-DSA before treating the implementation as certified.
+3. Run `BHTE/run_tests.ps1` in CI or a clean Windows shell and preserve the output.
+4. Add focused tests for BHTE state channels, AuxPoW, SPV bridge, and settlement contract behavior.
+5. Exercise BHTWalletPro manually: create/open wallet, send dialog validation, receive address generation, transaction history, Layer 2 connection settings.
+6. Run an external security audit before any public deployment.

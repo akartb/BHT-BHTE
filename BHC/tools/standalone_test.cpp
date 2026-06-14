@@ -8,6 +8,7 @@
 #include <random>
 #include <chrono>
 #include <iomanip>
+#include <array>
 
 namespace bhc {
 namespace crypto {
@@ -34,25 +35,28 @@ public:
     }
     
     static bool CheckProofOfWork(const std::vector<uint8_t>& hash, uint32_t nBits) {
-        uint32_t target = nBits & 0x007fffff;
+        // Decode the compact target into a 256-bit big-endian byte array:
+        // value = mantissa * 256^(exponent-3). Portable (no __int256).
+        uint32_t mantissa = nBits & 0x007fffff;
         uint32_t exponent = nBits >> 24;
-        
-        if (exponent <= 3) {
-            target >>= (8 * (3 - exponent));
-        } else {
-            target <<= (8 * (exponent - 3));
+
+        std::array<uint8_t, 32> target{}; // big-endian, MSB at index 0
+        for (int i = 0; i < 3; ++i) {
+            int pos = 34 - static_cast<int>(exponent) - i; // BE index for mantissa byte i
+            if (pos >= 0 && pos < 32) {
+                target[pos] = static_cast<uint8_t>((mantissa >> (8 * i)) & 0xFF);
+            }
         }
-        
-        uint256 hash_int = 0;
-        for (int i = 31; i >= 0; --i) {
-            hash_int = (hash_int << 8) | hash[i];
+
+        // The hash is stored little-endian (hash[31] is most significant), so its
+        // big-endian representation is the reverse. Compare lexicographically.
+        for (int idx = 0; idx < 32; ++idx) {
+            uint8_t h = hash[31 - idx];
+            if (h < target[idx]) return true;
+            if (h > target[idx]) return false;
         }
-        
-        return hash_int < target;
+        return false; // equal is not strictly below target
     }
-    
-private:
-    using uint256 = unsigned __int256;
 };
 
 // ==================== ML-DSA 简化实现 ====================
