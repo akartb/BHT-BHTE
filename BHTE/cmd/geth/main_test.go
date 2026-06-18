@@ -516,6 +516,20 @@ func TestSyncPeerImportsValidatedBlockRange(t *testing.T) {
 	if len(node.state.Txs) != 2 {
 		t.Fatalf("imported tx count = %d, want 2", len(node.state.Txs))
 	}
+	snapshot, ok := node.state.StateSnapshots[3]
+	if !ok {
+		t.Fatal("peer-imported block snapshot was not recorded")
+	}
+	if snapshot.Complete {
+		t.Fatalf("peer-imported snapshot marked complete: %#v", snapshot)
+	}
+	if snapshot.Source != "peer-summary" {
+		t.Fatalf("peer-imported snapshot source = %q, want peer-summary", snapshot.Source)
+	}
+	proofRaw, _ := json.Marshal([]interface{}{node.state.Accounts[0], []string{}, "latest"})
+	if _, err := node.call("eth_getProof", proofRaw); err == nil {
+		t.Fatal("expected eth_getProof on peer summary block to fail until full state replay exists")
+	}
 }
 
 func TestSyncPeerRejectsInvalidParent(t *testing.T) {

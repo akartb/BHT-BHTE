@@ -33,6 +33,10 @@ operable infrastructure.
 - BHTE peer sync can now fetch a bounded range of remote canonical blocks,
   validate number/parent hash/state root/receipt root/transaction root, and import
   the validated block summaries into the local canonical index.
+- Peer-imported BHTE block summaries are now recorded as incomplete
+  `peer-summary` state snapshots, so proof RPCs refuse to fabricate account or
+  storage proofs until the node has full execution replay or trusted state data
+  for that block.
 - BHTE does not yet implement a full Ethereum execution layer: opcode execution,
   gas/state transition rules, contract storage semantics, MPT proof generation,
   and consensus/P2P are still incomplete.
@@ -61,7 +65,8 @@ operable infrastructure.
   persistent canonical chain database, peer discovery, peer scoring, snap/header
   sync, and deterministic validator/miner configuration. Current status:
   bounded peer block-summary sync exists; full execution replay, fork choice, and
-  peer scoring are still pending.
+  peer scoring are still pending. Peer-imported summaries are explicitly marked
+  incomplete and cannot answer state proofs until replay/state-sync is available.
 - Replace BHTE selector-level contract simulation with full EVM state
   transitions: opcode execution, gas accounting, refunds, CALL/CREATE/SELFDESTRUCT
   semantics, storage/account trie updates, bloom filters, and receipt roots.
@@ -72,9 +77,10 @@ operable infrastructure.
   trie commit lookup, node retrieval, and receipt verification from persisted
   nodes exists. Single-log proof helpers exist as local receipt-proof plus
   log-content verification. Historical account/storage proof snapshots exist for
-  retained blocks. Remaining gaps: long-term database storage beyond JSON files,
-  pruning-safe node retention, and validation of replacement branch state during
-  deep reorgs.
+  retained locally executed blocks. Peer-synced block summaries are indexed but
+  proof-disabled. Remaining gaps: long-term database storage beyond JSON files,
+  pruning-safe node retention, state-sync or execution replay for peer blocks, and
+  validation of replacement branch state during deep reorgs.
 - Add deterministic replay tests that rebuild chain state from genesis and
   compare state roots across nodes.
 

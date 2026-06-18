@@ -203,6 +203,8 @@ type stateSnapshotRecord struct {
 	Height    uint64                       `json:"height"`
 	BlockHash string                       `json:"blockHash"`
 	StateRoot string                       `json:"stateRoot"`
+	Complete  bool                         `json:"complete"`
+	Source    string                       `json:"source,omitempty"`
 	Balances  map[string]string            `json:"balances"`
 	Nonces    map[string]uint64            `json:"nonces"`
 	Code      map[string]string            `json:"code"`
@@ -429,6 +431,13 @@ func (n *rpcNode) ensureState() {
 	}
 	if n.state.StateSnapshots == nil {
 		n.state.StateSnapshots = map[uint64]stateSnapshotRecord{}
+	}
+	for height, snapshot := range n.state.StateSnapshots {
+		if !snapshot.Complete && snapshot.Source == "" && snapshot.Balances != nil {
+			snapshot.Complete = true
+			snapshot.Source = "legacy-local"
+			n.state.StateSnapshots[height] = snapshot
+		}
 	}
 	if n.state.Peers == nil {
 		n.state.Peers = map[string]peerRecord{}
@@ -1053,6 +1062,8 @@ func (n *rpcNode) currentStateSnapshot(blockHash, stateRoot string) stateSnapsho
 		Height:    n.state.Height,
 		BlockHash: blockHash,
 		StateRoot: stateRoot,
+		Complete:  true,
+		Source:    "local",
 		Balances:  copyStringMap(n.state.Balances),
 		Nonces:    copyNonceMap(n.state.Nonces),
 		Code:      copyStringMap(n.state.Code),
@@ -1067,11 +1078,33 @@ func (n *rpcNode) storeStateSnapshot(height uint64, blockHash, stateRoot string)
 	n.state.StateSnapshots[height] = snapshot
 }
 
+func (n *rpcNode) storePeerStateSnapshot(block blockRecord) {
+	height := parseQuantity(block.Number).Uint64()
+	n.state.StateSnapshots[height] = stateSnapshotRecord{
+		Height:    height,
+		BlockHash: block.Hash,
+		StateRoot: block.StateRoot,
+		Complete:  false,
+		Source:    "peer-summary",
+		Balances:  map[string]string{},
+		Nonces:    map[string]uint64{},
+		Code:      map[string]string{},
+		Storage:   map[string]map[string]string{},
+		Timestamp: time.Now().Unix(),
+	}
+}
+
 func (n *rpcNode) snapshotForBlock(blockRef string) (stateSnapshotRecord, error) {
 	blockRef = strings.TrimSpace(blockRef)
 	if blockRef == "" || blockRef == "latest" || blockRef == "pending" {
 		latest := n.state.Blocks[len(n.state.Blocks)-1]
-		return n.currentStateSnapshot(latest.Hash, latest.StateRoot), nil
+		height := parseQuantity(latest.Number).Uint64()
+		if snapshot, ok := n.state.StateSnapshots[height]; ok {
+			if !snapshot.Complete {
+				return stateSnapshotRecord{}, fmt.Errorf("state snapshot for block %s is incomplete; full execution replay required", latest.Number)
+			}
+		}
+		return n.currentStateSnapshot(latest.Hash, ""), nil
 	}
 	var height uint64
 	if strings.HasPrefix(blockRef, "0x") {
@@ -1095,6 +1128,9 @@ func (n *rpcNode) snapshotForBlock(blockRef string) (stateSnapshotRecord, error)
 	snapshot, ok := n.state.StateSnapshots[height]
 	if !ok {
 		return stateSnapshotRecord{}, fmt.Errorf("state snapshot not found for block %s", blockRef)
+	}
+	if !snapshot.Complete {
+		return stateSnapshotRecord{}, fmt.Errorf("state snapshot for block %s is incomplete; full execution replay required", blockRef)
 	}
 	return snapshot, nil
 }
@@ -1492,8 +1528,9 @@ func (n *rpcNode) syncPeerBlocks(peer *peerRecord, startHeight, endHeight uint64
 		if err := n.validatePeerBlock(block, height); err != nil {
 			return imported, err
 		}
-		n.importPeerBlock(block)
-		imported++
+		if n.importPeerBlock(block) {
+			imported++
+		}
 	}
 	return imported, nil
 }
@@ -1511,6 +1548,9 @@ func (n *rpcNode) validatePeerBlock(block blockRecord, expectedHeight uint64) er
 	if parseQuantity(block.Number).Uint64() != expectedHeight {
 		return fmt.Errorf("peer block number mismatch: got %s want %s", block.Number, toHex(expectedHeight))
 	}
+	if existing := n.state.Canonical[expectedHeight]; existing != "" && !strings.EqualFold(existing, block.Hash) {
+		return fmt.Errorf("peer block %d conflicts with canonical hash: got %s want %s", expectedHeight, block.Hash, existing)
+	}
 	expectedParent := n.state.Canonical[expectedHeight-1]
 	if expectedParent == "" && len(n.state.Blocks) > 0 {
 		expectedParent = n.state.Blocks[len(n.state.Blocks)-1].Hash
@@ -1525,8 +1565,11 @@ func (n *rpcNode) validatePeerBlock(block blockRecord, expectedHeight uint64) er
 	return nil
 }
 
-func (n *rpcNode) importPeerBlock(block blockRecord) {
+func (n *rpcNode) importPeerBlock(block blockRecord) bool {
 	height := parseQuantity(block.Number).Uint64()
+	if existing := n.state.Canonical[height]; existing != "" && strings.EqualFold(existing, block.Hash) {
+		return false
+	}
 	n.state.Height = height
 	n.state.Blocks = append(n.state.Blocks, block)
 	n.state.Canonical[height] = block.Hash
@@ -1538,6 +1581,7 @@ func (n *rpcNode) importPeerBlock(block blockRecord) {
 		Timestamp: time.Now().Unix(),
 		Verified:  true,
 	}
+	n.storePeerStateSnapshot(block)
 	for i := range block.Transactions {
 		tx := block.Transactions[i]
 		tx.BlockHash = block.Hash
@@ -1548,6 +1592,7 @@ func (n *rpcNode) importPeerBlock(block blockRecord) {
 			n.state.Txs = append(n.state.Txs, tx)
 		}
 	}
+	return true
 }
 
 func (n *rpcNode) consensusStatus() map[string]interface{} {
@@ -1865,6 +1910,9 @@ func (n *rpcNode) accountProof(addr string, storageKeys []string, blockRef strin
 	}
 	tr := buildStateTrieFromSnapshot(snapshot)
 	stateRoot := tr.Hash()
+	if snapshot.StateRoot != "" && snapshot.StateRoot != zeroHash() && !strings.EqualFold(snapshot.StateRoot, stateRoot.Hex()) {
+		return nil, fmt.Errorf("state snapshot root mismatch at block %s: snapshot %s computed %s", toHex(snapshot.Height), snapshot.StateRoot, stateRoot.Hex())
+	}
 	accountProof := trienode.ProofList{}
 	_ = tr.Prove(crypto.Keccak256(common.HexToAddress(addr).Bytes()), &accountProof)
 	storageRoot := storageRootFromSnapshot(snapshot, addr)
