@@ -1,6 +1,25 @@
 # BHC + BHTE Project Status
 
-Last verified: 2026-06-14
+Last verified: 2026-06-18
+
+## Current Work
+
+This repository is currently in the engineering-hardening phase: the project is
+being moved from a demonstrable BHC/BHTE dual-chain prototype toward a node
+system that can verify its own state, replay synced blocks, recover from reorgs,
+and expose auditable proofs.
+
+It is not yet a BTC/ETH-grade public mainnet. The active work is focused on
+turning placeholder or summary-only paths into locally verifiable paths,
+especially inside BHTE.
+
+Read the current Chinese working note first:
+
+- [CURRENT_WORK.md](CURRENT_WORK.md)
+
+That document explains what we are doing now, why the project should be treated
+as a hardening prototype rather than a production network, and what must still
+be built before global operation.
 
 ## Overview
 
@@ -32,7 +51,13 @@ Observed result:
 
 ### BHTE
 
-The Go package structure has been repaired enough for all packages to compile, and tests pass using the Windows-safe script:
+BHTE is now the most actively hardened part of the workspace. It is a
+persistent JSON-RPC development node with txpool, local block production,
+receipt/log indexing, trie proof helpers, historical state snapshots, reorg
+rollback, and peer block replay validation for the current simplified execution
+model.
+
+The Go package structure compiles, and tests pass using the Windows-safe script:
 
 ```powershell
 cd D:\work0\BHT\BHTE
@@ -56,6 +81,13 @@ Key fixes made:
 - Replaced overflowing `uint64` defaults such as `1000000 * 1e18`.
 - Fixed ML-DSA fixed-size serialization/signature output and strengthened the hash fallback so tampered signatures are rejected.
 - Replaced a local absolute import path in the ML-DSA integration test.
+- Added account/storage proof generation from state trie snapshots.
+- Added receipt/log proof generation and local verification.
+- Added trie commit/node persistence APIs for proof inspection.
+- Added reorg rollback for balances, nonces, code, storage, receipts, logs,
+  snapshots, trie commits, and pending transactions.
+- Added peer block sync that replays remote block transactions locally, rebuilds
+  state/receipt/log commitments, and imports only matching blocks.
 
 ### BHTWalletPro
 
@@ -100,9 +132,20 @@ Recent UI/functionality expansion:
 
 ## Recommended Next Steps
 
-1. Re-run `BHC/tools/mldsa_fips204_selftest.cpp` on a host with an antivirus exclusion, then wire the verified implementation into `BHC/src/crypto/mldsa.cpp` and `BHTWalletPro/src/crypto/mldsa_signer.cpp`.
-2. Run NIST ACVP/KAT vectors against both Go and C++ ML-DSA before treating the implementation as certified.
-3. Run `BHTE/run_tests.ps1` in CI or a clean Windows shell and preserve the output.
-4. Add focused tests for BHTE state channels, AuxPoW, SPV bridge, and settlement contract behavior.
-5. Exercise BHTWalletPro manually: create/open wallet, send dialog validation, receive address generation, transaction history, Layer 2 connection settings.
-6. Run an external security audit before any public deployment.
+1. Replace BHTE's simplified selector-level execution with a fuller
+   EVM/state-transition implementation.
+2. Move BHTE state, trie nodes, receipts, and chain indexes from JSON files into
+   a production-style database layout.
+3. Replace RPC pull-style peer sync with real P2P, fork choice, peer scoring,
+   and state/header sync.
+4. Implement BHC L1 watcher, BHTE bridge event watcher, withdrawal broadcast,
+   and reorg-aware bridge accounting.
+5. Re-run `BHC/tools/mldsa_fips204_selftest.cpp` on a host with an antivirus
+   exclusion, then wire the verified implementation into `BHC/src/crypto` and
+   `BHTWalletPro`.
+6. Run NIST ACVP/KAT vectors against both Go and C++ ML-DSA before treating the
+   implementation as certified.
+7. Exercise BHTWalletPro manually and replace placeholder wallet DB/HD/transaction
+   builder paths before any real-fund use.
+8. Run long-lived multi-node testnets and external security audits before any
+   public deployment.

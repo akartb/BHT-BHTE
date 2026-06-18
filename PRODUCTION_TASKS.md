@@ -3,9 +3,14 @@
 Last updated: 2026-06-18
 
 This repository is currently a compileable, partially runnable dual-chain
-prototype. It is not yet a BTC/ETH-grade public mainnet. The checklist below is
-the engineering backlog needed before the project can be treated as globally
-operable infrastructure.
+prototype being actively hardened into a verifiable node system. It is not yet a
+BTC/ETH-grade public mainnet.
+
+For the current working narrative, read [CURRENT_WORK.md](CURRENT_WORK.md).
+That file explains what we are doing now: moving BHT/BHTE from demonstration
+paths toward locally replayable, proof-bearing, reorg-aware infrastructure. The
+checklist below is the engineering backlog needed before the project can be
+treated as globally operable infrastructure.
 
 ## Current Honest Status
 
