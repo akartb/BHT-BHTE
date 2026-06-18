@@ -376,3 +376,88 @@ func TestHistoricalAccountProofUsesStateSnapshot(t *testing.T) {
 		t.Fatalf("reloaded historical storage value = %v, want 0x2a", reloadedStorage["value"])
 	}
 }
+
+func TestReorgRollsBackStateProofIndexesAndPendingTransactions(t *testing.T) {
+	node := newTestNode(t)
+	from := node.state.Accounts[0]
+	contract := "0x0000000000000000000000000000000000000204"
+	slot := zeroHash()
+
+	block2Raw, _ := json.Marshal([]interface{}{map[string]interface{}{
+		"from":  from,
+		"to":    contract,
+		"value": "0x2a",
+		"gas":   "0x5208",
+		"data":  "0x6057361d",
+	}})
+	if _, err := node.call("eth_sendTransaction", block2Raw); err != nil {
+		t.Fatalf("block2 transaction failed: %v", err)
+	}
+	block2 := node.state.Blocks[len(node.state.Blocks)-1]
+
+	block3Raw, _ := json.Marshal([]interface{}{map[string]interface{}{
+		"from":  from,
+		"to":    contract,
+		"value": "0x2b",
+		"gas":   "0x5208",
+		"data":  "0x6057361d",
+	}})
+	txResult, err := node.call("eth_sendTransaction", block3Raw)
+	if err != nil {
+		t.Fatalf("block3 transaction failed: %v", err)
+	}
+	block3TxHash := txResult.(string)
+	block3 := node.state.Blocks[len(node.state.Blocks)-1]
+	if _, ok := node.state.StateSnapshots[3]; !ok {
+		t.Fatal("expected block 3 snapshot before reorg")
+	}
+
+	reorgRaw, _ := json.Marshal([]interface{}{"0x3", "0xabc"})
+	reorgResult, err := node.call("bhte_handleReorg", reorgRaw)
+	if err != nil {
+		t.Fatalf("bhte_handleReorg failed: %v", err)
+	}
+	reorg := reorgResult.(map[string]interface{})
+	if reorg["reorg"] != true {
+		t.Fatalf("expected reorg result, got %#v", reorg)
+	}
+	if node.state.Height != 2 {
+		t.Fatalf("height after reorg = %d, want 2", node.state.Height)
+	}
+	if len(node.state.Blocks) == 0 || node.state.Blocks[len(node.state.Blocks)-1].Hash != block2.Hash {
+		t.Fatalf("latest block after reorg is not block2: %#v", node.state.Blocks)
+	}
+	if _, ok := node.state.StateSnapshots[3]; ok {
+		t.Fatal("block 3 snapshot survived reorg")
+	}
+	if _, ok := node.state.Receipts[strings.ToLower(block3TxHash)]; ok {
+		t.Fatal("block 3 receipt survived reorg")
+	}
+	if len(node.state.PendingTxs) != 1 || node.state.PendingTxs[0].Hash != block3TxHash {
+		t.Fatalf("removed transaction was not requeued: %#v", node.state.PendingTxs)
+	}
+	for _, commit := range node.trieCommits {
+		if commit.Height >= 3 {
+			t.Fatalf("trie commit at removed height survived: %#v", commit)
+		}
+	}
+
+	latestRaw, _ := json.Marshal([]interface{}{contract, []string{slot}, "latest"})
+	latestResult, err := node.call("eth_getProof", latestRaw)
+	if err != nil {
+		t.Fatalf("latest eth_getProof after reorg failed: %v", err)
+	}
+	latest := latestResult.(map[string]interface{})
+	if latest["stateRoot"] != block2.StateRoot {
+		t.Fatalf("stateRoot after reorg = %v, want %s", latest["stateRoot"], block2.StateRoot)
+	}
+	latestStorage := latest["storageProof"].([]interface{})[0].(map[string]interface{})
+	if latestStorage["value"] != "0x2a" {
+		t.Fatalf("storage value after reorg = %v, want 0x2a", latestStorage["value"])
+	}
+
+	block3ProofRaw, _ := json.Marshal([]interface{}{contract, []string{slot}, block3.Number})
+	if _, err := node.call("eth_getProof", block3ProofRaw); err == nil {
+		t.Fatal("expected block 3 proof to fail after reorg")
+	}
+}

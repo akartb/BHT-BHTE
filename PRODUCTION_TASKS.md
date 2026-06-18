@@ -27,6 +27,9 @@ operable infrastructure.
 - BHTE now persists per-block state snapshots for balances, nonces, code, and
   storage, so `eth_getProof`/`bhte_getProof` can answer historical account and
   storage proofs for retained snapshots instead of always using latest state.
+- BHTE reorg handling now restores balances/nonces/code/storage from the
+  pre-reorg snapshot, removes orphaned receipts/logs/snapshots/trie commits, and
+  requeues transactions from removed blocks back into the pending pool.
 - BHTE does not yet implement a full Ethereum execution layer: opcode execution,
   gas/state transition rules, contract storage semantics, MPT proof generation,
   and consensus/P2P are still incomplete.
@@ -65,8 +68,8 @@ operable infrastructure.
   nodes exists. Single-log proof helpers exist as local receipt-proof plus
   log-content verification. Historical account/storage proof snapshots exist for
   retained blocks. Remaining gaps: long-term database storage beyond JSON files,
-  pruning-safe node retention, and canonical rollback of snapshots during deep
-  reorgs.
+  pruning-safe node retention, and validation of replacement branch state during
+  deep reorgs.
 - Add deterministic replay tests that rebuild chain state from genesis and
   compare state roots across nodes.
 

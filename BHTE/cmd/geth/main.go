@@ -1987,37 +1987,107 @@ func blockLogsBloomHex(receipts []receiptRecord) string {
 }
 
 func (n *rpcNode) handleReorg(height uint64, newHash string) map[string]interface{} {
+	if height <= 1 {
+		return map[string]interface{}{"reorg": false, "height": toHex(height), "message": "cannot reorg genesis"}
+	}
 	oldHash := n.state.Canonical[height]
 	if oldHash == "" || strings.EqualFold(oldHash, newHash) {
 		return map[string]interface{}{"reorg": false, "height": toHex(height), "hash": oldHash}
 	}
 	removed := 0
+	rollbackHeight := height - 1
+	snapshot, ok := n.state.StateSnapshots[rollbackHeight]
+	if !ok {
+		return map[string]interface{}{"reorg": false, "height": toHex(height), "message": "rollback snapshot not found"}
+	}
+	removedTxs := []txRecord{}
+	removedTxHashes := map[string]bool{}
 	filteredBlocks := n.state.Blocks[:0]
 	for _, block := range n.state.Blocks {
 		blockHeight := parseQuantity(block.Number).Uint64()
 		if blockHeight >= height {
 			removed++
+			for _, tx := range block.Transactions {
+				removedTxHashes[strings.ToLower(tx.Hash)] = true
+				tx.BlockHash = ""
+				tx.BlockNumber = ""
+				tx.TransactionIndex = ""
+				tx.Confirmations = 0
+				removedTxs = append(removedTxs, tx)
+			}
 			delete(n.state.Canonical, blockHeight)
 			continue
 		}
 		filteredBlocks = append(filteredBlocks, block)
 	}
 	n.state.Blocks = filteredBlocks
-	n.state.Height = height - 1
-	for i := range n.state.Logs {
-		logHeight := parseQuantity(n.state.Logs[i].BlockNumber).Uint64()
-		if logHeight >= height {
-			n.state.Logs[i].Removed = true
+	n.restoreStateSnapshot(snapshot)
+
+	filteredTxs := n.state.Txs[:0]
+	for _, tx := range n.state.Txs {
+		if removedTxHashes[strings.ToLower(tx.Hash)] {
+			continue
+		}
+		filteredTxs = append(filteredTxs, tx)
+	}
+	n.state.Txs = filteredTxs
+	for txHash := range removedTxHashes {
+		delete(n.state.Receipts, txHash)
+	}
+	filteredLogs := n.state.Logs[:0]
+	removedLogs := 0
+	for _, lg := range n.state.Logs {
+		if parseQuantity(lg.BlockNumber).Uint64() >= height || removedTxHashes[strings.ToLower(lg.TransactionHash)] {
+			removedLogs++
+			continue
+		}
+		filteredLogs = append(filteredLogs, lg)
+	}
+	n.state.Logs = filteredLogs
+	for id, withdrawal := range n.state.Withdrawals {
+		if removedTxHashes[strings.ToLower(withdrawal.L2TxHash)] {
+			delete(n.state.Withdrawals, id)
 		}
 	}
+	for anchorHeight := range n.state.Anchors {
+		if anchorHeight >= height {
+			delete(n.state.Anchors, anchorHeight)
+		}
+	}
+	for snapshotHeight := range n.state.StateSnapshots {
+		if snapshotHeight >= height {
+			delete(n.state.StateSnapshots, snapshotHeight)
+		}
+	}
+	filteredCommits := n.trieCommits[:0]
+	for _, commit := range n.trieCommits {
+		if commit.Height >= height {
+			continue
+		}
+		filteredCommits = append(filteredCommits, commit)
+	}
+	n.trieCommits = filteredCommits
+	n.state.PendingTxs = append(n.state.PendingTxs, removedTxs...)
 	n.save()
 	return map[string]interface{}{
 		"reorg":         true,
 		"height":        toHex(height),
+		"rollbackTo":    toHex(rollbackHeight),
 		"oldHash":       oldHash,
 		"newHash":       newHash,
 		"removedBlocks": removed,
+		"removedTxs":    len(removedTxs),
+		"removedLogs":   removedLogs,
+		"requeuedTxs":   len(removedTxs),
 	}
+}
+
+func (n *rpcNode) restoreStateSnapshot(snapshot stateSnapshotRecord) {
+	n.state.Height = snapshot.Height
+	n.state.Balances = copyStringMap(snapshot.Balances)
+	n.state.Nonces = copyNonceMap(snapshot.Nonces)
+	n.state.Code = copyStringMap(snapshot.Code)
+	n.state.Storage = copyNestedStringMap(snapshot.Storage)
 }
 
 func (n *rpcNode) securityStatus() map[string]interface{} {
