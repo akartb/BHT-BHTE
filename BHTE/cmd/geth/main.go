@@ -665,6 +665,16 @@ func (n *rpcNode) call(method string, raw json.RawMessage) (interface{}, error) 
 	case "bhte_getTrieCommit":
 		params := parseParams(raw)
 		return n.getTrieCommit(stringParam(params, 0)), nil
+	case "bhte_getReceiptProof":
+		params := parseParams(raw)
+		return n.receiptProof(stringParam(params, 0))
+	case "bhte_verifyReceiptProof":
+		params := parseParams(raw)
+		proof, err := objectParam(params, 0)
+		if err != nil {
+			return nil, err
+		}
+		return n.verifyReceiptProof(proof), nil
 	case "bhte_getProof":
 		params := parseParams(raw)
 		addr := normalizeAddress(stringParam(params, 0))
@@ -789,7 +799,7 @@ func (n *rpcNode) minePendingBlock() blockRecord {
 		StateRoot:    n.computeStateTrieRoot(),
 		TxRoot:       hashJSON(minedTxs),
 		ReceiptRoot:  n.computeReceiptTrieRoot(receipts),
-		LogsBloom:    zeroHash(),
+		LogsBloom:    blockLogsBloomHex(receipts),
 		Timestamp:    toHex(uint64(time.Now().Unix())),
 		Transactions: minedTxs,
 	}
@@ -838,10 +848,10 @@ func (n *rpcNode) applyMinedTransaction(tx txRecord, blockHash string, blockNumb
 		GasUsed:           "0x5208",
 		ContractAddress:   nil,
 		Logs:              logs,
-		LogsBloom:         zeroHash(),
 		Status:            status,
 		Type:              "0x0",
 	}
+	receipt.LogsBloom = receiptBloomHex(receipt)
 	return tx, receipt
 }
 
@@ -986,6 +996,13 @@ func (n *rpcNode) buildStateTrie() *trie.Trie {
 }
 
 func (n *rpcNode) computeReceiptTrieRoot(receipts []receiptRecord) string {
+	tr := n.buildReceiptTrie(receipts)
+	root, nodes := tr.Commit(true)
+	n.persistTrieNodes(root.Hex(), "receipts", n.state.Height, nodes)
+	return root.Hex()
+}
+
+func (n *rpcNode) buildReceiptTrie(receipts []receiptRecord) *trie.Trie {
 	tr := trie.NewEmpty(nil)
 	for i, receipt := range receipts {
 		encoded, err := rlp.EncodeToBytes(receipt.toGethReceipt())
@@ -995,9 +1012,7 @@ func (n *rpcNode) computeReceiptTrieRoot(receipts []receiptRecord) string {
 		key, _ := rlp.EncodeToBytes(uint(i))
 		tr.MustUpdate(key, encoded)
 	}
-	root, nodes := tr.Commit(true)
-	n.persistTrieNodes(root.Hex(), "receipts", n.state.Height, nodes)
-	return root.Hex()
+	return tr
 }
 
 func (n *rpcNode) persistTrieNodes(root, kind string, height uint64, nodes *trienode.NodeSet) {
@@ -1389,6 +1404,91 @@ func (n *rpcNode) getTrieCommit(root string) interface{} {
 	return nil
 }
 
+func (n *rpcNode) receiptProof(txHash string) (map[string]interface{}, error) {
+	receipt, ok := n.state.Receipts[strings.ToLower(txHash)]
+	if !ok {
+		return nil, fmt.Errorf("receipt not found")
+	}
+	block, ok := n.blockByHash(receipt.BlockHash)
+	if !ok {
+		return nil, fmt.Errorf("receipt block not found")
+	}
+	receipts := n.receiptsForBlock(block)
+	txIndex := parseQuantity(receipt.TransactionIndex).Uint64()
+	if txIndex >= uint64(len(receipts)) {
+		return nil, fmt.Errorf("receipt transaction index out of range")
+	}
+	tr := n.buildReceiptTrie(receipts)
+	root := tr.Hash()
+	key, _ := rlp.EncodeToBytes(uint(txIndex))
+	proof := trienode.ProofList{}
+	if err := tr.Prove(key, &proof); err != nil {
+		return nil, err
+	}
+	return map[string]interface{}{
+		"transactionHash":  receipt.TransactionHash,
+		"transactionIndex": receipt.TransactionIndex,
+		"blockHash":        block.Hash,
+		"blockNumber":      block.Number,
+		"receiptRoot":      root.Hex(),
+		"proof":            proofHexList(proof),
+		"receipt":          receipt,
+	}, nil
+}
+
+func (n *rpcNode) verifyReceiptProof(proof map[string]interface{}) map[string]interface{} {
+	root := common.HexToHash(fmt.Sprint(proof["receiptRoot"]))
+	index := quantityFromInterface(proof["transactionIndex"])
+	nodes := stringSliceFromInterface(proof["proof"])
+	proofDB, err := proofSetFromHex(nodes)
+	if err != nil {
+		return map[string]interface{}{"valid": false, "message": err.Error()}
+	}
+	key, _ := rlp.EncodeToBytes(uint(index))
+	value, err := trie.VerifyProof(root, key, proofDB)
+	if err != nil {
+		return map[string]interface{}{"valid": false, "message": err.Error()}
+	}
+	if len(value) == 0 {
+		return map[string]interface{}{"valid": false, "message": "receipt proof returned empty value"}
+	}
+	receiptObj, ok := proof["receipt"].(map[string]interface{})
+	if !ok {
+		return map[string]interface{}{"valid": false, "message": "missing receipt object"}
+	}
+	var receipt receiptRecord
+	data, _ := json.Marshal(receiptObj)
+	if err := json.Unmarshal(data, &receipt); err != nil {
+		return map[string]interface{}{"valid": false, "message": err.Error()}
+	}
+	expected, err := rlp.EncodeToBytes(receipt.toGethReceipt())
+	if err != nil {
+		return map[string]interface{}{"valid": false, "message": err.Error()}
+	}
+	valid := bytes.Equal(value, expected)
+	message := "receipt proof mismatch"
+	if valid {
+		message = "receipt proof verified"
+	}
+	return map[string]interface{}{
+		"valid":           valid,
+		"message":         message,
+		"receiptRoot":     root.Hex(),
+		"transactionHash": receipt.TransactionHash,
+		"blockHash":       receipt.BlockHash,
+	}
+}
+
+func (n *rpcNode) receiptsForBlock(block blockRecord) []receiptRecord {
+	receipts := make([]receiptRecord, 0, len(block.Transactions))
+	for _, tx := range block.Transactions {
+		if receipt, ok := n.state.Receipts[strings.ToLower(tx.Hash)]; ok {
+			receipts = append(receipts, receipt)
+		}
+	}
+	return receipts
+}
+
 func (n *rpcNode) accountProof(addr string, storageKeys []string) map[string]interface{} {
 	addr = normalizeAddress(addr)
 	tr := n.buildStateTrie()
@@ -1463,6 +1563,34 @@ func proofHexList(proof trienode.ProofList) []string {
 		out = append(out, "0x"+hex.EncodeToString(node))
 	}
 	return out
+}
+
+func proofSetFromHex(nodes []string) (*trienode.ProofSet, error) {
+	proof := trienode.ProofList{}
+	for _, node := range nodes {
+		blob := common.FromHex(node)
+		if len(blob) == 0 {
+			return nil, fmt.Errorf("empty proof node")
+		}
+		proof = append(proof, blob)
+	}
+	return proof.Set(), nil
+}
+
+func receiptBloomHex(receipt receiptRecord) string {
+	bloom := types.CreateBloom(receipt.toGethReceipt())
+	return "0x" + hex.EncodeToString(bloom.Bytes())
+}
+
+func blockLogsBloomHex(receipts []receiptRecord) string {
+	gethReceipts := make(types.Receipts, 0, len(receipts))
+	for _, receipt := range receipts {
+		r := receipt.toGethReceipt()
+		r.Bloom = types.CreateBloom(r)
+		gethReceipts = append(gethReceipts, r)
+	}
+	bloom := types.MergeBloom(gethReceipts)
+	return "0x" + hex.EncodeToString(bloom.Bytes())
 }
 
 func (n *rpcNode) handleReorg(height uint64, newHash string) map[string]interface{} {
@@ -1671,7 +1799,17 @@ func stringSliceParam(params []interface{}, index int) []string {
 	if index < 0 || index >= len(params) || params[index] == nil {
 		return nil
 	}
-	items, ok := params[index].([]interface{})
+	return stringSliceFromInterface(params[index])
+}
+
+func stringSliceFromInterface(value interface{}) []string {
+	if value == nil {
+		return nil
+	}
+	if strings, ok := value.([]string); ok {
+		return strings
+	}
+	items, ok := value.([]interface{})
 	if !ok {
 		return nil
 	}

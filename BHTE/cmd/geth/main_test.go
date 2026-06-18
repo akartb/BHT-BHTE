@@ -116,3 +116,64 @@ func TestTrieCommitsPersistAtMinedBlockHeight(t *testing.T) {
 		t.Fatalf("reloaded trie commits = %d, want %d", len(reloaded.trieCommits), len(node.trieCommits))
 	}
 }
+
+func TestReceiptProofRoundTrip(t *testing.T) {
+	node := newTestNode(t)
+	from := node.state.Accounts[0]
+
+	raw, _ := json.Marshal([]interface{}{map[string]interface{}{
+		"from":  from,
+		"to":    node.bridgeAddress,
+		"value": "0x1",
+		"gas":   "0x5208",
+		"data":  "withdraw",
+	}})
+	txResult, err := node.call("eth_sendTransaction", raw)
+	if err != nil {
+		t.Fatalf("eth_sendTransaction failed: %v", err)
+	}
+	txHash := txResult.(string)
+
+	receipt := node.state.Receipts[strings.ToLower(txHash)]
+	if receipt.LogsBloom == zeroHash() {
+		t.Fatal("receipt logsBloom must be populated")
+	}
+	latest := node.state.Blocks[len(node.state.Blocks)-1]
+	if latest.LogsBloom == zeroHash() {
+		t.Fatal("block logsBloom must be populated")
+	}
+
+	proofRaw, _ := json.Marshal([]interface{}{txHash})
+	proofResult, err := node.call("bhte_getReceiptProof", proofRaw)
+	if err != nil {
+		t.Fatalf("bhte_getReceiptProof failed: %v", err)
+	}
+	proof := proofResult.(map[string]interface{})
+	if proof["receiptRoot"] != latest.ReceiptRoot {
+		t.Fatalf("proof receiptRoot = %v, want %s", proof["receiptRoot"], latest.ReceiptRoot)
+	}
+	if len(proof["proof"].([]string)) == 0 {
+		t.Fatal("receipt proof nodes were not populated")
+	}
+
+	verifyRaw, _ := json.Marshal([]interface{}{proof})
+	verifyResult, err := node.call("bhte_verifyReceiptProof", verifyRaw)
+	if err != nil {
+		t.Fatalf("bhte_verifyReceiptProof failed: %v", err)
+	}
+	verification := verifyResult.(map[string]interface{})
+	if verification["valid"] != true {
+		t.Fatalf("receipt proof did not verify: %#v", verification)
+	}
+
+	proof["receiptRoot"] = zeroHash()
+	verifyRaw, _ = json.Marshal([]interface{}{proof})
+	verifyResult, err = node.call("bhte_verifyReceiptProof", verifyRaw)
+	if err != nil {
+		t.Fatalf("tampered bhte_verifyReceiptProof failed: %v", err)
+	}
+	verification = verifyResult.(map[string]interface{})
+	if verification["valid"] != false {
+		t.Fatalf("tampered receipt proof verified: %#v", verification)
+	}
+}
