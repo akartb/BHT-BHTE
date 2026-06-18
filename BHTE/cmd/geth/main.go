@@ -570,15 +570,8 @@ func (n *rpcNode) call(method string, raw json.RawMessage) (interface{}, error) 
 	case "eth_getProof":
 		params := parseParams(raw)
 		addr := normalizeAddress(stringParam(params, 0))
-		return map[string]interface{}{
-			"address":      addr,
-			"balance":      "0x" + n.balance(addr).Text(16),
-			"nonce":        toHex(n.state.Nonces[addr]),
-			"codeHash":     zeroHash(),
-			"storageHash":  zeroHash(),
-			"accountProof": []string{zeroHash()},
-			"storageProof": []interface{}{},
-		}, nil
+		keys := stringSliceParam(params, 1)
+		return n.accountProof(addr, keys), nil
 	case "eth_sendTransaction":
 		params := parseParams(raw)
 		tx, err := objectParam(params, 0)
@@ -675,7 +668,8 @@ func (n *rpcNode) call(method string, raw json.RawMessage) (interface{}, error) 
 	case "bhte_getProof":
 		params := parseParams(raw)
 		addr := normalizeAddress(stringParam(params, 0))
-		return n.accountProof(addr), nil
+		keys := stringSliceParam(params, 1)
+		return n.accountProof(addr, keys), nil
 	default:
 		return nil, fmt.Errorf("unsupported method %s", method)
 	}
@@ -787,6 +781,7 @@ func (n *rpcNode) minePendingBlock() blockRecord {
 		n.state.Txs = append(n.state.Txs, mined)
 	}
 
+	n.state.Height = blockNumber
 	block := blockRecord{
 		Number:       toHex(blockNumber),
 		Hash:         blockHash,
@@ -798,7 +793,6 @@ func (n *rpcNode) minePendingBlock() blockRecord {
 		Timestamp:    toHex(uint64(time.Now().Unix())),
 		Transactions: minedTxs,
 	}
-	n.state.Height = blockNumber
 	n.state.Blocks = append(n.state.Blocks, block)
 	n.state.Canonical[blockNumber] = block.Hash
 	n.state.Anchors[blockNumber] = anchorRecord{
@@ -960,6 +954,18 @@ func (n *rpcNode) computeStateRoot() string {
 }
 
 func (n *rpcNode) computeStateTrieRoot() string {
+	for _, account := range n.sortedAccounts() {
+		if len(n.state.Storage[account]) > 0 {
+			n.persistStorageTrie(account)
+		}
+	}
+	tr := n.buildStateTrie()
+	root, nodes := tr.Commit(true)
+	n.persistTrieNodes(root.Hex(), "state", n.state.Height, nodes)
+	return root.Hex()
+}
+
+func (n *rpcNode) buildStateTrie() *trie.Trie {
 	tr := trie.NewEmpty(nil)
 	for _, account := range n.sortedAccounts() {
 		addr := common.HexToAddress(account)
@@ -967,8 +973,8 @@ func (n *rpcNode) computeStateTrieRoot() string {
 		stateAccount := types.StateAccount{
 			Nonce:    n.state.Nonces[account],
 			Balance:  balance,
-			Root:     types.EmptyRootHash,
-			CodeHash: types.EmptyCodeHash.Bytes(),
+			Root:     common.HexToHash(n.storageRoot(account)),
+			CodeHash: n.codeHash(account).Bytes(),
 		}
 		encoded, err := rlp.EncodeToBytes(&stateAccount)
 		if err != nil {
@@ -976,9 +982,7 @@ func (n *rpcNode) computeStateTrieRoot() string {
 		}
 		tr.MustUpdate(crypto.Keccak256(addr.Bytes()), encoded)
 	}
-	root, nodes := tr.Commit(true)
-	n.persistTrieNodes(root.Hex(), "state", n.state.Height, nodes)
-	return root.Hex()
+	return tr
 }
 
 func (n *rpcNode) computeReceiptTrieRoot(receipts []receiptRecord) string {
@@ -999,6 +1003,11 @@ func (n *rpcNode) computeReceiptTrieRoot(receipts []receiptRecord) string {
 func (n *rpcNode) persistTrieNodes(root, kind string, height uint64, nodes *trienode.NodeSet) {
 	if nodes == nil {
 		return
+	}
+	for _, commit := range n.trieCommits {
+		if strings.EqualFold(commit.Root, root) && commit.Kind == kind && commit.Height == height {
+			return
+		}
 	}
 	record := trieCommitRecord{
 		Root:      root,
@@ -1027,6 +1036,12 @@ func (n *rpcNode) sortedAccounts() []string {
 		seen[normalizeAddress(account)] = true
 	}
 	for _, account := range n.state.Accounts {
+		seen[normalizeAddress(account)] = true
+	}
+	for account := range n.state.Code {
+		seen[normalizeAddress(account)] = true
+	}
+	for account := range n.state.Storage {
 		seen[normalizeAddress(account)] = true
 	}
 	accounts := make([]string, 0, len(seen))
@@ -1374,29 +1389,80 @@ func (n *rpcNode) getTrieCommit(root string) interface{} {
 	return nil
 }
 
-func (n *rpcNode) accountProof(addr string) map[string]interface{} {
+func (n *rpcNode) accountProof(addr string, storageKeys []string) map[string]interface{} {
 	addr = normalizeAddress(addr)
-	stateRoot := n.computeStateTrieRoot()
+	tr := n.buildStateTrie()
+	stateRoot := tr.Hash()
+	accountProof := trienode.ProofList{}
+	_ = tr.Prove(crypto.Keccak256(common.HexToAddress(addr).Bytes()), &accountProof)
+	storageRoot := n.storageRoot(addr)
+	storageProofs := make([]interface{}, 0, len(storageKeys))
+	for _, key := range storageKeys {
+		key = normalizeStorageKey(key)
+		storageTrie := n.buildStorageTrie(addr)
+		proof := trienode.ProofList{}
+		_ = storageTrie.Prove(crypto.Keccak256(common.FromHex(key)), &proof)
+		storageProofs = append(storageProofs, map[string]interface{}{
+			"key":   key,
+			"value": stringOrDefault(n.state.Storage[addr][key], zeroHash()),
+			"proof": proofHexList(proof),
+		})
+	}
 	return map[string]interface{}{
 		"address":      addr,
 		"balance":      "0x" + n.balance(addr).Text(16),
 		"nonce":        toHex(n.state.Nonces[addr]),
-		"codeHash":     crypto.Keccak256Hash(common.FromHex(n.state.Code[addr])).Hex(),
-		"storageHash":  n.storageRoot(addr),
-		"stateRoot":    stateRoot,
-		"accountProof": []string{stateRoot},
-		"storageProof": []interface{}{},
+		"codeHash":     n.codeHash(addr).Hex(),
+		"storageHash":  storageRoot,
+		"stateRoot":    stateRoot.Hex(),
+		"accountProof": proofHexList(accountProof),
+		"storageProof": storageProofs,
 	}
 }
 
 func (n *rpcNode) storageRoot(addr string) string {
+	return n.buildStorageTrie(addr).Hash().Hex()
+}
+
+func (n *rpcNode) buildStorageTrie(addr string) *trie.Trie {
 	tr := trie.NewEmpty(nil)
-	for key, value := range n.state.Storage[addr] {
-		tr.MustUpdate(common.FromHex(key), common.FromHex(value))
+	keys := make([]string, 0, len(n.state.Storage[addr]))
+	for key := range n.state.Storage[addr] {
+		keys = append(keys, normalizeStorageKey(key))
 	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		value := n.state.Storage[addr][key]
+		encoded, err := rlp.EncodeToBytes(common.TrimLeftZeroes(common.FromHex(value)))
+		if err != nil {
+			continue
+		}
+		tr.MustUpdate(crypto.Keccak256(common.FromHex(key)), encoded)
+	}
+	return tr
+}
+
+func (n *rpcNode) persistStorageTrie(addr string) string {
+	tr := n.buildStorageTrie(addr)
 	root, nodes := tr.Commit(true)
 	n.persistTrieNodes(root.Hex(), "storage:"+addr, n.state.Height, nodes)
 	return root.Hex()
+}
+
+func (n *rpcNode) codeHash(addr string) common.Hash {
+	code := common.FromHex(n.state.Code[normalizeAddress(addr)])
+	if len(code) == 0 {
+		return types.EmptyCodeHash
+	}
+	return crypto.Keccak256Hash(code)
+}
+
+func proofHexList(proof trienode.ProofList) []string {
+	out := make([]string, 0, len(proof))
+	for _, node := range proof {
+		out = append(out, "0x"+hex.EncodeToString(node))
+	}
+	return out
 }
 
 func (n *rpcNode) handleReorg(height uint64, newHash string) map[string]interface{} {

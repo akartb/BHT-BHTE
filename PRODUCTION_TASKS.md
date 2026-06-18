@@ -12,6 +12,9 @@ operable infrastructure.
 - BHTE has a persistent JSON-RPC development node with txpool, block production,
   receipts/logs, state-root anchoring, bridge events, withdrawal records, simple
   reorg handling, and peer sync endpoints.
+- BHTE `eth_getProof` now returns account/storage trie proofs derived from the
+  current state trie instead of all-zero placeholders, and mined blocks persist
+  state, receipt, and storage trie commits at the mined block height.
 - BHTE does not yet implement a full Ethereum execution layer: opcode execution,
   gas/state transition rules, contract storage semantics, MPT proof generation,
   and consensus/P2P are still incomplete.
@@ -44,7 +47,9 @@ operable infrastructure.
   semantics, storage/account trie updates, bloom filters, and receipt roots.
 - Persist BHTE account/storage trie nodes in a real database and expose standard
   MPT proof generation/verification for accounts, storage slots, receipts, and
-  logs.
+  logs. Current status: current-state account/storage proof generation exists;
+  historical proof lookup, receipt/log proof verification, and database-backed
+  node retrieval are still pending.
 - Add deterministic replay tests that rebuild chain state from genesis and
   compare state roots across nodes.
 
