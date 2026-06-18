@@ -177,3 +177,54 @@ func TestReceiptProofRoundTrip(t *testing.T) {
 		t.Fatalf("tampered receipt proof verified: %#v", verification)
 	}
 }
+
+func TestLogProofRoundTrip(t *testing.T) {
+	node := newTestNode(t)
+	from := node.state.Accounts[0]
+
+	raw, _ := json.Marshal([]interface{}{map[string]interface{}{
+		"from":  from,
+		"to":    node.bridgeAddress,
+		"value": "0x1",
+		"gas":   "0x5208",
+		"data":  "withdraw",
+	}})
+	txResult, err := node.call("eth_sendTransaction", raw)
+	if err != nil {
+		t.Fatalf("eth_sendTransaction failed: %v", err)
+	}
+	txHash := txResult.(string)
+
+	proofRaw, _ := json.Marshal([]interface{}{txHash, "0x0"})
+	proofResult, err := node.call("bhte_getLogProof", proofRaw)
+	if err != nil {
+		t.Fatalf("bhte_getLogProof failed: %v", err)
+	}
+	proof := proofResult.(map[string]interface{})
+	if proof["logIndex"] != "0x0" {
+		t.Fatalf("logIndex = %v, want 0x0", proof["logIndex"])
+	}
+
+	verifyRaw, _ := json.Marshal([]interface{}{proof})
+	verifyResult, err := node.call("bhte_verifyLogProof", verifyRaw)
+	if err != nil {
+		t.Fatalf("bhte_verifyLogProof failed: %v", err)
+	}
+	verification := verifyResult.(map[string]interface{})
+	if verification["valid"] != true {
+		t.Fatalf("log proof did not verify: %#v", verification)
+	}
+
+	logObj := proof["log"].(logRecord)
+	logObj.Topics[0] = zeroHash()
+	proof["log"] = logObj
+	verifyRaw, _ = json.Marshal([]interface{}{proof})
+	verifyResult, err = node.call("bhte_verifyLogProof", verifyRaw)
+	if err != nil {
+		t.Fatalf("tampered bhte_verifyLogProof failed: %v", err)
+	}
+	verification = verifyResult.(map[string]interface{})
+	if verification["valid"] != false {
+		t.Fatalf("tampered log proof verified: %#v", verification)
+	}
+}

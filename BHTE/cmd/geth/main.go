@@ -675,6 +675,16 @@ func (n *rpcNode) call(method string, raw json.RawMessage) (interface{}, error) 
 			return nil, err
 		}
 		return n.verifyReceiptProof(proof), nil
+	case "bhte_getLogProof":
+		params := parseParams(raw)
+		return n.logProof(stringParam(params, 0), quantityParam(params, 1))
+	case "bhte_verifyLogProof":
+		params := parseParams(raw)
+		proof, err := objectParam(params, 0)
+		if err != nil {
+			return nil, err
+		}
+		return n.verifyLogProof(proof), nil
 	case "bhte_getProof":
 		params := parseParams(raw)
 		addr := normalizeAddress(stringParam(params, 0))
@@ -1477,6 +1487,94 @@ func (n *rpcNode) verifyReceiptProof(proof map[string]interface{}) map[string]in
 		"transactionHash": receipt.TransactionHash,
 		"blockHash":       receipt.BlockHash,
 	}
+}
+
+func (n *rpcNode) logProof(txHash string, logIndex uint64) (map[string]interface{}, error) {
+	receiptProof, err := n.receiptProof(txHash)
+	if err != nil {
+		return nil, err
+	}
+	receipt := receiptProof["receipt"].(receiptRecord)
+	if logIndex >= uint64(len(receipt.Logs)) {
+		return nil, fmt.Errorf("log index out of range")
+	}
+	log := receipt.Logs[logIndex]
+	return map[string]interface{}{
+		"transactionHash": txHash,
+		"logIndex":        toHex(logIndex),
+		"log":             log,
+		"receiptProof":    receiptProof,
+	}, nil
+}
+
+func (n *rpcNode) verifyLogProof(proof map[string]interface{}) map[string]interface{} {
+	receiptProof, ok := proof["receiptProof"].(map[string]interface{})
+	if !ok {
+		return map[string]interface{}{"valid": false, "message": "missing receipt proof"}
+	}
+	receiptVerification := n.verifyReceiptProof(receiptProof)
+	if receiptVerification["valid"] != true {
+		return map[string]interface{}{
+			"valid":          false,
+			"message":        "receipt proof invalid",
+			"receiptMessage": receiptVerification["message"],
+		}
+	}
+	receiptObj, ok := receiptProof["receipt"].(map[string]interface{})
+	if !ok {
+		return map[string]interface{}{"valid": false, "message": "missing receipt object"}
+	}
+	var receipt receiptRecord
+	data, _ := json.Marshal(receiptObj)
+	if err := json.Unmarshal(data, &receipt); err != nil {
+		return map[string]interface{}{"valid": false, "message": err.Error()}
+	}
+	logIndex := quantityFromInterface(proof["logIndex"])
+	if logIndex >= uint64(len(receipt.Logs)) {
+		return map[string]interface{}{"valid": false, "message": "log index out of range"}
+	}
+	logObj, ok := proof["log"].(map[string]interface{})
+	if !ok {
+		return map[string]interface{}{"valid": false, "message": "missing log object"}
+	}
+	var claimed logRecord
+	data, _ = json.Marshal(logObj)
+	if err := json.Unmarshal(data, &claimed); err != nil {
+		return map[string]interface{}{"valid": false, "message": err.Error()}
+	}
+	actual := receipt.Logs[logIndex]
+	valid := logsEqual(actual, claimed)
+	message := "log proof mismatch"
+	if valid {
+		message = "log proof verified"
+	}
+	return map[string]interface{}{
+		"valid":           valid,
+		"message":         message,
+		"transactionHash": receipt.TransactionHash,
+		"blockHash":       receipt.BlockHash,
+		"logIndex":        toHex(logIndex),
+	}
+}
+
+func logsEqual(a, b logRecord) bool {
+	if normalizeAddress(a.Address) != normalizeAddress(b.Address) ||
+		a.Data != b.Data ||
+		a.BlockNumber != b.BlockNumber ||
+		a.BlockHash != b.BlockHash ||
+		a.TransactionHash != b.TransactionHash ||
+		a.TransactionIndex != b.TransactionIndex ||
+		a.LogIndex != b.LogIndex ||
+		a.Removed != b.Removed ||
+		len(a.Topics) != len(b.Topics) {
+		return false
+	}
+	for i := range a.Topics {
+		if !strings.EqualFold(a.Topics[i], b.Topics[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 func (n *rpcNode) receiptsForBlock(block blockRecord) []receiptRecord {

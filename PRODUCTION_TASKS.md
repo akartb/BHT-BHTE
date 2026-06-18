@@ -18,6 +18,9 @@ operable infrastructure.
 - BHTE can now produce and locally verify transaction receipt trie proofs through
   `bhte_getReceiptProof` and `bhte_verifyReceiptProof`; receipt and block
   `logsBloom` values are populated from actual logs instead of zero placeholders.
+- BHTE can now produce and locally verify single-log proofs through
+  `bhte_getLogProof` and `bhte_verifyLogProof`, binding bridge event log content
+  to a verified receipt proof.
 - BHTE does not yet implement a full Ethereum execution layer: opcode execution,
   gas/state transition rules, contract storage semantics, MPT proof generation,
   and consensus/P2P are still incomplete.
@@ -52,8 +55,8 @@ operable infrastructure.
   MPT proof generation/verification for accounts, storage slots, receipts, and
   logs. Current status: current-state account/storage proof generation exists;
   transaction receipt proof generation and local verification exists; historical
-  proof lookup, individual log proof helpers, and database-backed node retrieval
-  are still pending.
+  proof lookup and database-backed node retrieval are still pending. Single-log
+  proof helpers exist as local receipt-proof plus log-content verification.
 - Add deterministic replay tests that rebuild chain state from genesis and
   compare state roots across nodes.
 
