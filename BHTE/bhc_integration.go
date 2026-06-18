@@ -8,7 +8,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -66,6 +69,70 @@ type GetBlockHeaderResult struct {
 	Merkleroot    string `json:"merkleroot"`
 }
 
+func (h *GetBlockHeaderResult) UnmarshalJSON(data []byte) error {
+	type headerJSON struct {
+		Hash          string          `json:"hash"`
+		Height        uint64          `json:"height"`
+		Confirmations uint64          `json:"confirmations"`
+		PreviousHash  string          `json:"previousblockhash"`
+		Time          int64           `json:"time"`
+		Bits          json.RawMessage `json:"bits"`
+		Nonce         uint64          `json:"nonce"`
+		Merkleroot    string          `json:"merkleroot"`
+	}
+
+	var raw headerJSON
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+
+	bits, err := parseCompactBits(raw.Bits)
+	if err != nil {
+		return err
+	}
+
+	*h = GetBlockHeaderResult{
+		Hash:          raw.Hash,
+		Height:        raw.Height,
+		Confirmations: raw.Confirmations,
+		PreviousHash:  raw.PreviousHash,
+		Time:          raw.Time,
+		Bits:          bits,
+		Nonce:         raw.Nonce,
+		Merkleroot:    raw.Merkleroot,
+	}
+	return nil
+}
+
+func parseCompactBits(raw json.RawMessage) (uint32, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return 0, nil
+	}
+
+	var bitString string
+	if err := json.Unmarshal(raw, &bitString); err == nil {
+		bitString = strings.TrimSpace(bitString)
+		bitString = strings.TrimPrefix(strings.TrimPrefix(bitString, "0x"), "0X")
+		if bitString == "" {
+			return 0, nil
+		}
+		value, err := strconv.ParseUint(bitString, 16, 32)
+		if err != nil {
+			return 0, fmt.Errorf("invalid compact bits %q: %w", bitString, err)
+		}
+		return uint32(value), nil
+	}
+
+	var bitNumber uint64
+	if err := json.Unmarshal(raw, &bitNumber); err != nil {
+		return 0, fmt.Errorf("invalid compact bits: %w", err)
+	}
+	if bitNumber > uint64(^uint32(0)) {
+		return 0, fmt.Errorf("compact bits value overflows uint32: %d", bitNumber)
+	}
+	return uint32(bitNumber), nil
+}
+
 type GetRawTransactionResult struct {
 	Hex      string `json:"hex"`
 	Txid     string `json:"txid"`
@@ -104,6 +171,20 @@ func DefaultIntegrationConfig() *IntegrationConfig {
 	}
 }
 
+func rpcURLWithCredentials(rawURL, user, password string) string {
+	if user == "" {
+		return rawURL
+	}
+
+	parsed, err := url.Parse(rawURL)
+	if err != nil || parsed.User != nil {
+		return rawURL
+	}
+
+	parsed.User = url.UserPassword(user, password)
+	return parsed.String()
+}
+
 func NewBHCIntegration(config *IntegrationConfig) (*BHCIntegration, error) {
 	if config == nil {
 		config = DefaultIntegrationConfig()
@@ -111,7 +192,7 @@ func NewBHCIntegration(config *IntegrationConfig) (*BHCIntegration, error) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	client := jsonrpc.NewClient(config.NodeURL)
+	client := jsonrpc.NewClient(rpcURLWithCredentials(config.NodeURL, config.RPCUser, config.RPCPassword))
 
 	return &BHCIntegration{
 		rpcClient: client,
@@ -139,26 +220,45 @@ func (b *BHCIntegration) GetBlockCount() (int64, error) {
 	ctx, cancel := context.WithTimeout(b.ctx, b.config.Timeout)
 	defer cancel()
 
-	var result GetBlockCountResult
-	err := b.rpcClient.CallFor(ctx, &result, "getblockcount")
+	var raw json.RawMessage
+	err := b.rpcClient.CallFor(ctx, &raw, "getblockcount")
 	if err != nil {
 		return 0, fmt.Errorf("getblockcount failed: %w", err)
 	}
 
+	var height int64
+	if err := json.Unmarshal(raw, &height); err == nil {
+		return height, nil
+	}
+
+	var result GetBlockCountResult
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return 0, fmt.Errorf("getblockcount returned invalid result %s: %w", string(raw), err)
+	}
 	return result.Height, nil
 }
 
-func (b *BHCIntegration) GetBlockHeader(height uint64) (*GetBlockHeaderResult, error) {
+func (b *BHCIntegration) GetBlockHash(height uint64) (string, error) {
 	ctx, cancel := context.WithTimeout(b.ctx, b.config.Timeout)
 	defer cancel()
 
-	var result GetBlockHeaderResult
-	err := b.rpcClient.CallFor(ctx, &result, "getblockheader", height)
+	var hash string
+	if err := b.rpcClient.CallFor(ctx, &hash, "getblockhash", height); err != nil {
+		return "", fmt.Errorf("getblockhash failed at height %d: %w", height, err)
+	}
+	if hash == "" {
+		return "", fmt.Errorf("getblockhash returned empty hash at height %d", height)
+	}
+	return hash, nil
+}
+
+func (b *BHCIntegration) GetBlockHeader(height uint64) (*GetBlockHeaderResult, error) {
+	hash, err := b.GetBlockHash(height)
 	if err != nil {
-		return nil, fmt.Errorf("getblockheader failed: %w", err)
+		return nil, err
 	}
 
-	return &result, nil
+	return b.GetBlockHeaderByHash(hash)
 }
 
 func (b *BHCIntegration) GetBlockHeaderByHash(hash string) (*GetBlockHeaderResult, error) {
@@ -166,9 +266,15 @@ func (b *BHCIntegration) GetBlockHeaderByHash(hash string) (*GetBlockHeaderResul
 	defer cancel()
 
 	var result GetBlockHeaderResult
-	err := b.rpcClient.CallFor(ctx, &result, "getblockheader", hash)
+	err := b.rpcClient.CallFor(ctx, &result, "getblockheader", hash, true)
+	if err != nil {
+		err = b.rpcClient.CallFor(ctx, &result, "getblockheader", hash)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("getblockheader failed: %w", err)
+	}
+	if result.Hash == "" {
+		result.Hash = hash
 	}
 
 	return &result, nil

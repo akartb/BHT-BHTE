@@ -1,0 +1,116 @@
+# BHT/BHTE Production Readiness Tasks
+
+Last updated: 2026-06-18
+
+This repository is currently a compileable, partially runnable dual-chain
+prototype. It is not yet a BTC/ETH-grade public mainnet. The checklist below is
+the engineering backlog needed before the project can be treated as globally
+operable infrastructure.
+
+## Current Honest Status
+
+- BHTE has a persistent JSON-RPC development node with txpool, block production,
+  receipts/logs, state-root anchoring, bridge events, withdrawal records, simple
+  reorg handling, and peer sync endpoints.
+- BHTE does not yet implement a full Ethereum execution layer: opcode execution,
+  gas/state transition rules, contract storage semantics, MPT proof generation,
+  and consensus/P2P are still incomplete.
+- BHC is not yet a Bitcoin Core-equivalent L1 node. It has chain parameters,
+  ProgPoW/ML-DSA components, scripts, and standalone smoke tests, but still
+  needs production P2P, mempool, UTXO/index databases, mining, RPC coverage,
+  reorg handling, and long-running validation.
+- The bridge has stronger SPV/Merkle/nBits validation and a compileable
+  settlement contract, but it is not yet a trust-minimized production bridge.
+- BHTWalletPro builds and starts with Qt runtime deployment, but the wallet
+  database, HD wallet, transaction construction/signing, history sync, backup,
+  and hardware-wallet workflows are not production-complete.
+- BHTE Go ML-DSA and the zkEVM precompile are real implementations with local
+  tests, but still need NIST ACVP/KAT validation and external review.
+- BHC C++ has an unintegrated pure C++ FIPS 204 implementation candidate in
+  `BHC/src/crypto/mldsa_fips204.h`. It must be rerun through the standalone
+  self-test on a host that allows new crypto executables before replacing the
+  current non-liboqs fallback.
+
+## P0: Consensus and Execution
+
+- Implement BHC production L1 node components: peer discovery, version/verack,
+  inventory relay, block/tx relay, ban scoring, headers-first sync, UTXO set,
+  block index, mempool policy, mining template, difficulty adjustment, and RPC.
+- Implement BHTE production consensus: block proposal, validation, fork choice,
+  persistent canonical chain database, peer discovery, peer scoring, snap/header
+  sync, and deterministic validator/miner configuration.
+- Replace BHTE selector-level contract simulation with full EVM state
+  transitions: opcode execution, gas accounting, refunds, CALL/CREATE/SELFDESTRUCT
+  semantics, storage/account trie updates, bloom filters, and receipt roots.
+- Persist BHTE account/storage trie nodes in a real database and expose standard
+  MPT proof generation/verification for accounts, storage slots, receipts, and
+  logs.
+- Add deterministic replay tests that rebuild chain state from genesis and
+  compare state roots across nodes.
+
+## P0: Bridge and Cross-Chain Safety
+
+- Run a real BHC L1 watcher that scans canonical BHC blocks, tracks reorgs, and
+  produces confirmed deposit/anchor proofs.
+- Run a real BHTE watcher that scans bridge contract logs and drives withdrawal
+  finalization after the challenge period.
+- Implement on-chain/light-client verification for BHC headers or a clearly
+  defined validator set with slashing/challenge rules.
+- Implement BHT L1 withdrawal broadcast with fee estimation, nonce/UTXO
+  management, idempotent retry, conflict detection, and reorg rollback.
+- Add bridge accounting invariants: total locked BHT, total minted BHTE, pending
+  withdrawals, challenged withdrawals, and completed withdrawals must reconcile.
+- Add end-to-end bridge tests for deposit, mint, withdraw, challenge, finalize,
+  L1 reorg, L2 reorg, duplicate proof, and invalid proof flows.
+
+## P0: Cryptography and Keys
+
+- Validate Go ML-DSA and C++ ML-DSA against official NIST ACVP/KAT vectors.
+- Integrate the verified C++ FIPS 204 ML-DSA fallback into `BHC/src/crypto` and
+  `BHTWalletPro`, or require liboqs at build/runtime with matching FIPS 204
+  parameter sizes.
+- Align all Level3/Level5 sizes to FIPS 204 across BHC, BHTE, wallet, tests, and
+  documentation: ML-DSA-65 signature size is 3309 bytes, ML-DSA-87 is 4627 bytes.
+- Add constant-time checks, memory-zeroing audits, fuzz tests, and negative test
+  vectors for malformed keys/signatures.
+
+## P1: Wallet Production Features
+
+- Replace placeholder wallet DB methods with encrypted persistent storage,
+  schema migrations, backup/restore, wallet locking, and corruption recovery.
+- Implement HD seed generation/import/export, address derivation, key rotation,
+  watch-only accounts, multisig, and descriptor-style metadata.
+- Implement BHT UTXO transaction construction: coin selection, change output,
+  fee estimation, signing, PSBT-like export/import, and broadcast.
+- Implement BHTE transaction construction: nonce tracking, gas estimation, chain
+  ID enforcement, contract calls, receipt polling, and history sync.
+- Add transaction history indexing, confirmations, replaced/dropped transaction
+  detection, bridge status tracking, and rescan support.
+- Add developer mode diagnostics without exposing unsafe private-key or signing
+  controls by default.
+
+## P1: Operations, Security, and CI
+
+- Add RPC authentication, TLS guidance, CORS restrictions, rate limits, request
+  size limits, and safe defaults for public/private interfaces.
+- Add structured logs, metrics, health checks, pprof/debug gating, and alerting
+  hooks for nodes, bridge services, and wallet backend services.
+- Add CI for Windows/Linux builds, Go tests, C++ tests, Solidity compile/tests,
+  static analysis, formatting, dependency vulnerability checks, and artifact
+  signing.
+- Add fuzz/property tests for blocks, transactions, scripts, RPC parsers, bridge
+  proofs, trie proofs, and wallet transaction builders.
+- Run long-lived multi-node testnets with network partitions, restarts, reorgs,
+  corrupted DBs, and bridge stress tests before any public launch.
+- Commission external security audits for consensus, bridge, cryptography, and
+  wallet key management.
+
+## P2: Compatibility and Ecosystem
+
+- Define stable BHT and BHTE RPC specifications and compatibility tests.
+- Provide block explorer/indexer APIs for balances, transactions, logs, receipts,
+  bridge events, and finality status.
+- Provide reproducible builds, signed releases, chain configuration files,
+  genesis generation, seed nodes, faucets/testnet tools, and operator docs.
+- Add SDK examples for deposits, withdrawals, BHTE contract deployment, wallet
+  integration, and ML-DSA signature verification.

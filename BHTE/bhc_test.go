@@ -6,7 +6,11 @@ package bhc
 
 import (
 	"crypto/rand"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
+	"time"
 
 	consensusbhc "bhte/consensus/bhc"
 	configbhc "bhte/core/bhc"
@@ -213,6 +217,112 @@ func TestBHCIntegration(t *testing.T) {
 
 		if config.RetryCount != MaxRetries {
 			t.Errorf("RetryCount = %d, want %d", config.RetryCount, MaxRetries)
+		}
+	})
+
+	t.Run("BitcoinStyleRPC", func(t *testing.T) {
+		const blockHash = "0000000000000000000abc1234567890abc1234567890abc1234567890abc1234"
+		const merkleRoot = "4d5e6f0000000000000000000000000000000000000000000000000000000000"
+
+		var methods []string
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var req struct {
+				ID     any               `json:"id"`
+				Method string            `json:"method"`
+				Params []json.RawMessage `json:"params"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatalf("decode rpc request: %v", err)
+			}
+			methods = append(methods, req.Method)
+
+			var result any
+			switch req.Method {
+			case "getblockcount":
+				result = float64(101)
+			case "getblockhash":
+				if len(req.Params) != 1 {
+					t.Fatalf("getblockhash params = %d, want 1", len(req.Params))
+				}
+				var height uint64
+				if err := json.Unmarshal(req.Params[0], &height); err != nil {
+					t.Fatalf("decode getblockhash height: %v", err)
+				}
+				if height != 100 {
+					t.Fatalf("getblockhash height = %d, want 100", height)
+				}
+				result = blockHash
+			case "getblockheader":
+				if len(req.Params) != 2 {
+					t.Fatalf("getblockheader params = %d, want 2", len(req.Params))
+				}
+				var hash string
+				if err := json.Unmarshal(req.Params[0], &hash); err != nil {
+					t.Fatalf("decode getblockheader hash: %v", err)
+				}
+				if hash != blockHash {
+					t.Fatalf("getblockheader hash = %s, want %s", hash, blockHash)
+				}
+				var verbose bool
+				if err := json.Unmarshal(req.Params[1], &verbose); err != nil {
+					t.Fatalf("decode getblockheader verbose: %v", err)
+				}
+				if !verbose {
+					t.Fatal("getblockheader verbose flag must be true")
+				}
+				result = map[string]any{
+					"hash":              blockHash,
+					"height":            float64(100),
+					"confirmations":     float64(2),
+					"previousblockhash": "0000000000000000000111111111111111111111111111111111111111111111",
+					"time":              float64(1781760000),
+					"bits":              "1d00ffff",
+					"nonce":             float64(2083236893),
+					"merkleroot":        merkleRoot,
+				}
+			default:
+				t.Fatalf("unexpected rpc method %s", req.Method)
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(map[string]any{
+				"jsonrpc": "2.0",
+				"id":      req.ID,
+				"result":  result,
+			}); err != nil {
+				t.Fatalf("encode rpc response: %v", err)
+			}
+		}))
+		defer server.Close()
+
+		integration, err := NewBHCIntegration(&IntegrationConfig{
+			NodeURL:    server.URL,
+			Timeout:    2 * time.Second,
+			RetryCount: 1,
+			RetryDelay: time.Millisecond,
+		})
+		if err != nil {
+			t.Fatalf("NewBHCIntegration failed: %v", err)
+		}
+		defer integration.Stop()
+
+		height, err := integration.GetBlockCount()
+		if err != nil {
+			t.Fatalf("GetBlockCount failed: %v", err)
+		}
+		if height != 101 {
+			t.Fatalf("GetBlockCount = %d, want 101", height)
+		}
+
+		header, err := integration.GetBlockHeader(100)
+		if err != nil {
+			t.Fatalf("GetBlockHeader failed: %v", err)
+		}
+		if header.Hash != blockHash || header.Height != 100 || header.Bits != 0x1d00ffff || header.Merkleroot != merkleRoot {
+			t.Fatalf("unexpected header: %+v", header)
+		}
+		if len(methods) != 3 || methods[0] != "getblockcount" || methods[1] != "getblockhash" || methods[2] != "getblockheader" {
+			t.Fatalf("rpc methods = %v, want [getblockcount getblockhash getblockheader]", methods)
 		}
 	})
 }
