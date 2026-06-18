@@ -197,22 +197,34 @@ type trieCommitRecord struct {
 	Timestamp int64            `json:"timestamp"`
 }
 
+type stateSnapshotRecord struct {
+	Height    uint64                       `json:"height"`
+	BlockHash string                       `json:"blockHash"`
+	StateRoot string                       `json:"stateRoot"`
+	Balances  map[string]string            `json:"balances"`
+	Nonces    map[string]uint64            `json:"nonces"`
+	Code      map[string]string            `json:"code"`
+	Storage   map[string]map[string]string `json:"storage"`
+	Timestamp int64                        `json:"timestamp"`
+}
+
 type nodeState struct {
-	Height      uint64                       `json:"height"`
-	Accounts    []string                     `json:"accounts"`
-	Balances    map[string]string            `json:"balances"`
-	Nonces      map[string]uint64            `json:"nonces"`
-	PendingTxs  []txRecord                   `json:"pendingTransactions"`
-	Txs         []txRecord                   `json:"transactions"`
-	Blocks      []blockRecord                `json:"blocks"`
-	Receipts    map[string]receiptRecord     `json:"receipts"`
-	Logs        []logRecord                  `json:"logs"`
-	Withdrawals map[string]withdrawalRecord  `json:"withdrawals"`
-	Anchors     map[uint64]anchorRecord      `json:"anchors"`
-	Canonical   map[uint64]string            `json:"canonical"`
-	Code        map[string]string            `json:"code"`
-	Storage     map[string]map[string]string `json:"storage"`
-	Peers       map[string]peerRecord        `json:"peers"`
+	Height         uint64                         `json:"height"`
+	Accounts       []string                       `json:"accounts"`
+	Balances       map[string]string              `json:"balances"`
+	Nonces         map[string]uint64              `json:"nonces"`
+	PendingTxs     []txRecord                     `json:"pendingTransactions"`
+	Txs            []txRecord                     `json:"transactions"`
+	Blocks         []blockRecord                  `json:"blocks"`
+	Receipts       map[string]receiptRecord       `json:"receipts"`
+	Logs           []logRecord                    `json:"logs"`
+	Withdrawals    map[string]withdrawalRecord    `json:"withdrawals"`
+	Anchors        map[uint64]anchorRecord        `json:"anchors"`
+	Canonical      map[uint64]string              `json:"canonical"`
+	Code           map[string]string              `json:"code"`
+	Storage        map[string]map[string]string   `json:"storage"`
+	StateSnapshots map[uint64]stateSnapshotRecord `json:"stateSnapshots"`
+	Peers          map[string]peerRecord          `json:"peers"`
 }
 
 type rpcNode struct {
@@ -249,21 +261,22 @@ func newRPCNode(args []string) (*rpcNode, error) {
 		maxGasLimit:      30000000,
 		challengeSeconds: 7 * 24 * 60 * 60,
 		state: nodeState{
-			Height:      1,
-			Accounts:    []string{"0x0000000000000000000000000000000000000100"},
-			Balances:    map[string]string{"0x0000000000000000000000000000000000000100": "0x3635c9adc5dea00000"},
-			Nonces:      map[string]uint64{},
-			PendingTxs:  []txRecord{},
-			Txs:         []txRecord{},
-			Blocks:      []blockRecord{},
-			Receipts:    map[string]receiptRecord{},
-			Logs:        []logRecord{},
-			Withdrawals: map[string]withdrawalRecord{},
-			Anchors:     map[uint64]anchorRecord{},
-			Canonical:   map[uint64]string{},
-			Code:        map[string]string{},
-			Storage:     map[string]map[string]string{},
-			Peers:       map[string]peerRecord{},
+			Height:         1,
+			Accounts:       []string{"0x0000000000000000000000000000000000000100"},
+			Balances:       map[string]string{"0x0000000000000000000000000000000000000100": "0x3635c9adc5dea00000"},
+			Nonces:         map[string]uint64{},
+			PendingTxs:     []txRecord{},
+			Txs:            []txRecord{},
+			Blocks:         []blockRecord{},
+			Receipts:       map[string]receiptRecord{},
+			Logs:           []logRecord{},
+			Withdrawals:    map[string]withdrawalRecord{},
+			Anchors:        map[uint64]anchorRecord{},
+			Canonical:      map[uint64]string{},
+			Code:           map[string]string{},
+			Storage:        map[string]map[string]string{},
+			StateSnapshots: map[uint64]stateSnapshotRecord{},
+			Peers:          map[string]peerRecord{},
 		},
 	}
 
@@ -412,6 +425,9 @@ func (n *rpcNode) ensureState() {
 	if n.state.Storage == nil {
 		n.state.Storage = map[string]map[string]string{}
 	}
+	if n.state.StateSnapshots == nil {
+		n.state.StateSnapshots = map[uint64]stateSnapshotRecord{}
+	}
 	if n.state.Peers == nil {
 		n.state.Peers = map[string]peerRecord{}
 	}
@@ -424,6 +440,13 @@ func (n *rpcNode) ensureState() {
 	for _, account := range n.state.Accounts {
 		if _, ok := n.state.Balances[account]; !ok {
 			n.state.Balances[account] = "0x3635c9adc5dea00000"
+		}
+	}
+	if len(n.state.Blocks) > 0 {
+		latest := n.state.Blocks[len(n.state.Blocks)-1]
+		height := parseQuantity(latest.Number).Uint64()
+		if _, ok := n.state.StateSnapshots[height]; !ok {
+			n.storeStateSnapshot(height, latest.Hash, latest.StateRoot)
 		}
 	}
 }
@@ -571,7 +594,7 @@ func (n *rpcNode) call(method string, raw json.RawMessage) (interface{}, error) 
 		params := parseParams(raw)
 		addr := normalizeAddress(stringParam(params, 0))
 		keys := stringSliceParam(params, 1)
-		return n.accountProof(addr, keys), nil
+		return n.accountProof(addr, keys, stringParam(params, 2))
 	case "eth_sendTransaction":
 		params := parseParams(raw)
 		tx, err := objectParam(params, 0)
@@ -702,7 +725,7 @@ func (n *rpcNode) call(method string, raw json.RawMessage) (interface{}, error) 
 		params := parseParams(raw)
 		addr := normalizeAddress(stringParam(params, 0))
 		keys := stringSliceParam(params, 1)
-		return n.accountProof(addr, keys), nil
+		return n.accountProof(addr, keys, stringParam(params, 2))
 	default:
 		return nil, fmt.Errorf("unsupported method %s", method)
 	}
@@ -836,6 +859,7 @@ func (n *rpcNode) minePendingBlock() blockRecord {
 		Timestamp: time.Now().Unix(),
 		Verified:  true,
 	}
+	n.storeStateSnapshot(blockNumber, block.Hash, block.StateRoot)
 	n.save()
 	return block
 }
@@ -999,15 +1023,19 @@ func (n *rpcNode) computeStateTrieRoot() string {
 }
 
 func (n *rpcNode) buildStateTrie() *trie.Trie {
+	return buildStateTrieFromSnapshot(n.currentStateSnapshot("", ""))
+}
+
+func buildStateTrieFromSnapshot(snapshot stateSnapshotRecord) *trie.Trie {
 	tr := trie.NewEmpty(nil)
-	for _, account := range n.sortedAccounts() {
+	for _, account := range sortedSnapshotAccounts(snapshot) {
 		addr := common.HexToAddress(account)
-		balance, _ := uint256.FromBig(n.balance(account))
+		balance, _ := uint256.FromBig(parseQuantity(snapshot.Balances[account]))
 		stateAccount := types.StateAccount{
-			Nonce:    n.state.Nonces[account],
+			Nonce:    snapshot.Nonces[account],
 			Balance:  balance,
-			Root:     common.HexToHash(n.storageRoot(account)),
-			CodeHash: n.codeHash(account).Bytes(),
+			Root:     common.HexToHash(storageRootFromSnapshot(snapshot, account)),
+			CodeHash: codeHashFromSnapshot(snapshot, account).Bytes(),
 		}
 		encoded, err := rlp.EncodeToBytes(&stateAccount)
 		if err != nil {
@@ -1016,6 +1044,57 @@ func (n *rpcNode) buildStateTrie() *trie.Trie {
 		tr.MustUpdate(crypto.Keccak256(addr.Bytes()), encoded)
 	}
 	return tr
+}
+
+func (n *rpcNode) currentStateSnapshot(blockHash, stateRoot string) stateSnapshotRecord {
+	return stateSnapshotRecord{
+		Height:    n.state.Height,
+		BlockHash: blockHash,
+		StateRoot: stateRoot,
+		Balances:  copyStringMap(n.state.Balances),
+		Nonces:    copyNonceMap(n.state.Nonces),
+		Code:      copyStringMap(n.state.Code),
+		Storage:   copyNestedStringMap(n.state.Storage),
+		Timestamp: time.Now().Unix(),
+	}
+}
+
+func (n *rpcNode) storeStateSnapshot(height uint64, blockHash, stateRoot string) {
+	snapshot := n.currentStateSnapshot(blockHash, stateRoot)
+	snapshot.Height = height
+	n.state.StateSnapshots[height] = snapshot
+}
+
+func (n *rpcNode) snapshotForBlock(blockRef string) (stateSnapshotRecord, error) {
+	blockRef = strings.TrimSpace(blockRef)
+	if blockRef == "" || blockRef == "latest" || blockRef == "pending" {
+		latest := n.state.Blocks[len(n.state.Blocks)-1]
+		return n.currentStateSnapshot(latest.Hash, latest.StateRoot), nil
+	}
+	var height uint64
+	if strings.HasPrefix(blockRef, "0x") {
+		height = parseQuantity(blockRef).Uint64()
+	} else {
+		for _, block := range n.state.Blocks {
+			if strings.EqualFold(block.Hash, blockRef) {
+				height = parseQuantity(block.Number).Uint64()
+				break
+			}
+		}
+		if height == 0 {
+			if parsed, err := strconv.ParseUint(blockRef, 10, 64); err == nil {
+				height = parsed
+			}
+		}
+	}
+	if height == 0 {
+		return stateSnapshotRecord{}, fmt.Errorf("unsupported proof block reference %q", blockRef)
+	}
+	snapshot, ok := n.state.StateSnapshots[height]
+	if !ok {
+		return stateSnapshotRecord{}, fmt.Errorf("state snapshot not found for block %s", blockRef)
+	}
+	return snapshot, nil
 }
 
 func (n *rpcNode) computeReceiptTrieRoot(receipts []receiptRecord) string {
@@ -1689,50 +1768,69 @@ func (n *rpcNode) receiptsForBlock(block blockRecord) []receiptRecord {
 	return receipts
 }
 
-func (n *rpcNode) accountProof(addr string, storageKeys []string) map[string]interface{} {
+func (n *rpcNode) accountProof(addr string, storageKeys []string, blockRef string) (map[string]interface{}, error) {
 	addr = normalizeAddress(addr)
-	tr := n.buildStateTrie()
+	snapshot, err := n.snapshotForBlock(blockRef)
+	if err != nil {
+		return nil, err
+	}
+	tr := buildStateTrieFromSnapshot(snapshot)
 	stateRoot := tr.Hash()
 	accountProof := trienode.ProofList{}
 	_ = tr.Prove(crypto.Keccak256(common.HexToAddress(addr).Bytes()), &accountProof)
-	storageRoot := n.storageRoot(addr)
+	storageRoot := storageRootFromSnapshot(snapshot, addr)
 	storageProofs := make([]interface{}, 0, len(storageKeys))
 	for _, key := range storageKeys {
 		key = normalizeStorageKey(key)
-		storageTrie := n.buildStorageTrie(addr)
+		storageTrie := buildStorageTrieFromSnapshot(snapshot, addr)
 		proof := trienode.ProofList{}
 		_ = storageTrie.Prove(crypto.Keccak256(common.FromHex(key)), &proof)
+		value := zeroHash()
+		if snapshot.Storage[addr] != nil {
+			value = stringOrDefault(snapshot.Storage[addr][key], zeroHash())
+		}
 		storageProofs = append(storageProofs, map[string]interface{}{
 			"key":   key,
-			"value": stringOrDefault(n.state.Storage[addr][key], zeroHash()),
+			"value": value,
 			"proof": proofHexList(proof),
 		})
 	}
 	return map[string]interface{}{
 		"address":      addr,
-		"balance":      "0x" + n.balance(addr).Text(16),
-		"nonce":        toHex(n.state.Nonces[addr]),
-		"codeHash":     n.codeHash(addr).Hex(),
+		"balance":      stringOrDefault(snapshot.Balances[addr], "0x0"),
+		"nonce":        toHex(snapshot.Nonces[addr]),
+		"codeHash":     codeHashFromSnapshot(snapshot, addr).Hex(),
 		"storageHash":  storageRoot,
 		"stateRoot":    stateRoot.Hex(),
+		"blockNumber":  toHex(snapshot.Height),
+		"blockHash":    snapshot.BlockHash,
 		"accountProof": proofHexList(accountProof),
 		"storageProof": storageProofs,
-	}
+	}, nil
 }
 
 func (n *rpcNode) storageRoot(addr string) string {
-	return n.buildStorageTrie(addr).Hash().Hex()
+	return storageRootFromSnapshot(n.currentStateSnapshot("", ""), addr)
 }
 
 func (n *rpcNode) buildStorageTrie(addr string) *trie.Trie {
+	return buildStorageTrieFromSnapshot(n.currentStateSnapshot("", ""), addr)
+}
+
+func storageRootFromSnapshot(snapshot stateSnapshotRecord, addr string) string {
+	return buildStorageTrieFromSnapshot(snapshot, addr).Hash().Hex()
+}
+
+func buildStorageTrieFromSnapshot(snapshot stateSnapshotRecord, addr string) *trie.Trie {
+	addr = normalizeAddress(addr)
 	tr := trie.NewEmpty(nil)
-	keys := make([]string, 0, len(n.state.Storage[addr]))
-	for key := range n.state.Storage[addr] {
+	keys := make([]string, 0, len(snapshot.Storage[addr]))
+	for key := range snapshot.Storage[addr] {
 		keys = append(keys, normalizeStorageKey(key))
 	}
 	sort.Strings(keys)
 	for _, key := range keys {
-		value := n.state.Storage[addr][key]
+		value := snapshot.Storage[addr][key]
 		encoded, err := rlp.EncodeToBytes(common.TrimLeftZeroes(common.FromHex(value)))
 		if err != nil {
 			continue
@@ -1750,11 +1848,39 @@ func (n *rpcNode) persistStorageTrie(addr string) string {
 }
 
 func (n *rpcNode) codeHash(addr string) common.Hash {
-	code := common.FromHex(n.state.Code[normalizeAddress(addr)])
+	return codeHashFromSnapshot(n.currentStateSnapshot("", ""), addr)
+}
+
+func codeHashFromSnapshot(snapshot stateSnapshotRecord, addr string) common.Hash {
+	code := common.FromHex(snapshot.Code[normalizeAddress(addr)])
 	if len(code) == 0 {
 		return types.EmptyCodeHash
 	}
 	return crypto.Keccak256Hash(code)
+}
+
+func sortedSnapshotAccounts(snapshot stateSnapshotRecord) []string {
+	seen := map[string]bool{}
+	for account := range snapshot.Balances {
+		seen[normalizeAddress(account)] = true
+	}
+	for account := range snapshot.Nonces {
+		seen[normalizeAddress(account)] = true
+	}
+	for account := range snapshot.Code {
+		seen[normalizeAddress(account)] = true
+	}
+	for account := range snapshot.Storage {
+		seen[normalizeAddress(account)] = true
+	}
+	accounts := make([]string, 0, len(seen))
+	for account := range seen {
+		if common.IsHexAddress(account) {
+			accounts = append(accounts, account)
+		}
+	}
+	sort.Strings(accounts)
+	return accounts
 }
 
 func proofHexList(proof trienode.ProofList) []string {
@@ -1814,6 +1940,34 @@ func receiptFromInterface(value interface{}) (receiptRecord, error) {
 		return receipt, fmt.Errorf("missing receipt transaction hash")
 	}
 	return receipt, nil
+}
+
+func copyStringMap(input map[string]string) map[string]string {
+	out := make(map[string]string, len(input))
+	for key, value := range input {
+		out[normalizeAddress(key)] = value
+	}
+	return out
+}
+
+func copyNonceMap(input map[string]uint64) map[string]uint64 {
+	out := make(map[string]uint64, len(input))
+	for key, value := range input {
+		out[normalizeAddress(key)] = value
+	}
+	return out
+}
+
+func copyNestedStringMap(input map[string]map[string]string) map[string]map[string]string {
+	out := make(map[string]map[string]string, len(input))
+	for account, slots := range input {
+		account = normalizeAddress(account)
+		out[account] = make(map[string]string, len(slots))
+		for key, value := range slots {
+			out[account][normalizeStorageKey(key)] = value
+		}
+	}
+	return out
 }
 
 func receiptBloomHex(receipt receiptRecord) string {

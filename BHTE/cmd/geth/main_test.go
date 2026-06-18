@@ -303,3 +303,76 @@ func TestTrieDatabaseNodeLookupAndReceiptVerification(t *testing.T) {
 		t.Fatalf("tampered receipt verified from trie database: %#v", verification)
 	}
 }
+
+func TestHistoricalAccountProofUsesStateSnapshot(t *testing.T) {
+	node := newTestNode(t)
+	from := node.state.Accounts[0]
+	contract := "0x0000000000000000000000000000000000000203"
+	slot := zeroHash()
+
+	firstRaw, _ := json.Marshal([]interface{}{map[string]interface{}{
+		"from":  from,
+		"to":    contract,
+		"value": "0x2a",
+		"gas":   "0x5208",
+		"data":  "0x6057361d",
+	}})
+	if _, err := node.call("eth_sendTransaction", firstRaw); err != nil {
+		t.Fatalf("first eth_sendTransaction failed: %v", err)
+	}
+	block2 := node.state.Blocks[len(node.state.Blocks)-1]
+
+	secondRaw, _ := json.Marshal([]interface{}{map[string]interface{}{
+		"from":  from,
+		"to":    contract,
+		"value": "0x2b",
+		"gas":   "0x5208",
+		"data":  "0x6057361d",
+	}})
+	if _, err := node.call("eth_sendTransaction", secondRaw); err != nil {
+		t.Fatalf("second eth_sendTransaction failed: %v", err)
+	}
+
+	historicalRaw, _ := json.Marshal([]interface{}{contract, []string{slot}, "0x2"})
+	historicalResult, err := node.call("eth_getProof", historicalRaw)
+	if err != nil {
+		t.Fatalf("historical eth_getProof failed: %v", err)
+	}
+	historical := historicalResult.(map[string]interface{})
+	if historical["blockNumber"] != "0x2" || historical["blockHash"] != block2.Hash {
+		t.Fatalf("historical proof block context mismatch: %#v", historical)
+	}
+	if historical["stateRoot"] != block2.StateRoot {
+		t.Fatalf("historical stateRoot = %v, want %s", historical["stateRoot"], block2.StateRoot)
+	}
+	historicalStorage := historical["storageProof"].([]interface{})[0].(map[string]interface{})
+	if historicalStorage["value"] != "0x2a" {
+		t.Fatalf("historical storage value = %v, want 0x2a", historicalStorage["value"])
+	}
+
+	latestRaw, _ := json.Marshal([]interface{}{contract, []string{slot}, "latest"})
+	latestResult, err := node.call("eth_getProof", latestRaw)
+	if err != nil {
+		t.Fatalf("latest eth_getProof failed: %v", err)
+	}
+	latest := latestResult.(map[string]interface{})
+	latestStorage := latest["storageProof"].([]interface{})[0].(map[string]interface{})
+	if latestStorage["value"] != "0x2b" {
+		t.Fatalf("latest storage value = %v, want 0x2b", latestStorage["value"])
+	}
+
+	node.save()
+	reloaded, err := newRPCNode([]string{"--datadir", node.dataDir, "--dev-insecure"})
+	if err != nil {
+		t.Fatalf("reload node failed: %v", err)
+	}
+	reloadedResult, err := reloaded.call("eth_getProof", historicalRaw)
+	if err != nil {
+		t.Fatalf("reloaded historical eth_getProof failed: %v", err)
+	}
+	reloadedProof := reloadedResult.(map[string]interface{})
+	reloadedStorage := reloadedProof["storageProof"].([]interface{})[0].(map[string]interface{})
+	if reloadedStorage["value"] != "0x2a" {
+		t.Fatalf("reloaded historical storage value = %v, want 0x2a", reloadedStorage["value"])
+	}
+}

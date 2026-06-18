@@ -24,6 +24,9 @@ operable infrastructure.
 - BHTE can now list persisted trie commits, read individual persisted trie nodes,
   and verify receipts directly against the local trie-node database through
   `bhte_getTrieCommits`, `bhte_getTrieNode`, and `bhte_verifyReceiptInTrie`.
+- BHTE now persists per-block state snapshots for balances, nonces, code, and
+  storage, so `eth_getProof`/`bhte_getProof` can answer historical account and
+  storage proofs for retained snapshots instead of always using latest state.
 - BHTE does not yet implement a full Ethereum execution layer: opcode execution,
   gas/state transition rules, contract storage semantics, MPT proof generation,
   and consensus/P2P are still incomplete.
@@ -60,9 +63,10 @@ operable infrastructure.
   transaction receipt proof generation and local verification exists; historical
   trie commit lookup, node retrieval, and receipt verification from persisted
   nodes exists. Single-log proof helpers exist as local receipt-proof plus
-  log-content verification. Remaining gaps: historical account/storage snapshots,
-  receipt/log proof APIs backed by long-term database storage, and pruning-safe
-  node retention.
+  log-content verification. Historical account/storage proof snapshots exist for
+  retained blocks. Remaining gaps: long-term database storage beyond JSON files,
+  pruning-safe node retention, and canonical rollback of snapshots during deep
+  reorgs.
 - Add deterministic replay tests that rebuild chain state from genesis and
   compare state roots across nodes.
 
