@@ -247,6 +247,7 @@ type rpcNode struct {
 	bhtRPCPass       string
 	autoMine         bool
 	strictMode       bool
+	replayMode       bool
 	minGasLimit      uint64
 	maxGasLimit      uint64
 	challengeSeconds int64
@@ -1155,6 +1156,19 @@ func (n *rpcNode) buildReceiptTrie(receipts []receiptRecord) *trie.Trie {
 	return tr
 }
 
+func receiptTrieRoot(receipts []receiptRecord) string {
+	tr := trie.NewEmpty(nil)
+	for i, receipt := range receipts {
+		encoded, err := rlp.EncodeToBytes(receipt.toGethReceipt())
+		if err != nil {
+			continue
+		}
+		key, _ := rlp.EncodeToBytes(uint(i))
+		tr.MustUpdate(key, encoded)
+	}
+	return tr.Hash().Hex()
+}
+
 func (n *rpcNode) persistTrieNodes(root, kind string, height uint64, nodes *trienode.NodeSet) {
 	if nodes == nil {
 		return
@@ -1341,18 +1355,20 @@ func (n *rpcNode) initiateWithdrawal(request map[string]interface{}) withdrawalR
 		CreatedAt:         now,
 	}
 	n.state.Withdrawals[id] = withdrawal
-	n.state.Logs = append(n.state.Logs, logRecord{
-		Address:          n.bridgeAddress,
-		Topics:           []string{topicHash("WithdrawalInitiated"), paddedTopic(recipient)},
-		Data:             amount,
-		BlockNumber:      toHex(n.state.Height),
-		BlockHash:        n.state.Blocks[len(n.state.Blocks)-1].Hash,
-		TransactionHash:  l2TxHash,
-		TransactionIndex: "0x0",
-		LogIndex:         toHex(uint64(len(n.state.Logs))),
-		Removed:          false,
-	})
-	n.save()
+	if !n.replayMode {
+		n.state.Logs = append(n.state.Logs, logRecord{
+			Address:          n.bridgeAddress,
+			Topics:           []string{topicHash("WithdrawalInitiated"), paddedTopic(recipient)},
+			Data:             amount,
+			BlockNumber:      toHex(n.state.Height),
+			BlockHash:        n.state.Blocks[len(n.state.Blocks)-1].Hash,
+			TransactionHash:  l2TxHash,
+			TransactionIndex: "0x0",
+			LogIndex:         toHex(uint64(len(n.state.Logs))),
+			Removed:          false,
+		})
+		n.save()
+	}
 	return withdrawal
 }
 
@@ -1426,7 +1442,9 @@ func (n *rpcNode) submitAnchor(anchor map[string]interface{}) anchorRecord {
 		Verified:  true,
 	}
 	n.state.Anchors[height] = record
-	n.save()
+	if !n.replayMode {
+		n.save()
+	}
 	return record
 }
 
@@ -1528,7 +1546,11 @@ func (n *rpcNode) syncPeerBlocks(peer *peerRecord, startHeight, endHeight uint64
 		if err := n.validatePeerBlock(block, height); err != nil {
 			return imported, err
 		}
-		if n.importPeerBlock(block) {
+		importedBlock, err := n.importPeerBlock(block)
+		if err != nil {
+			return imported, err
+		}
+		if importedBlock {
 			imported++
 		}
 	}
@@ -1565,11 +1587,19 @@ func (n *rpcNode) validatePeerBlock(block blockRecord, expectedHeight uint64) er
 	return nil
 }
 
-func (n *rpcNode) importPeerBlock(block blockRecord) bool {
+func (n *rpcNode) importPeerBlock(block blockRecord) (bool, error) {
 	height := parseQuantity(block.Number).Uint64()
 	if existing := n.state.Canonical[height]; existing != "" && strings.EqualFold(existing, block.Hash) {
-		return false
+		return false, nil
 	}
+	minedTxs, receipts, err := n.replayPeerBlock(block)
+	if err != nil {
+		return false, err
+	}
+	block.Transactions = minedTxs
+	block.TxRoot = hashJSON(minedTxs)
+	block.ReceiptRoot = n.computeReceiptTrieRoot(receipts)
+	block.LogsBloom = blockLogsBloomHex(receipts)
 	n.state.Height = height
 	n.state.Blocks = append(n.state.Blocks, block)
 	n.state.Canonical[height] = block.Hash
@@ -1581,18 +1611,73 @@ func (n *rpcNode) importPeerBlock(block blockRecord) bool {
 		Timestamp: time.Now().Unix(),
 		Verified:  true,
 	}
-	n.storePeerStateSnapshot(block)
-	for i := range block.Transactions {
-		tx := block.Transactions[i]
-		tx.BlockHash = block.Hash
-		tx.BlockNumber = block.Number
-		tx.TransactionIndex = toHex(uint64(i))
-		tx.Confirmations = 1
+	n.storeStateSnapshot(height, block.Hash, block.StateRoot)
+	for i, tx := range minedTxs {
+		receipt := receipts[i]
+		n.state.Receipts[strings.ToLower(tx.Hash)] = receipt
+		n.state.Logs = append(n.state.Logs, receipt.Logs...)
 		if _, exists := n.transactionByHash(tx.Hash); !exists {
 			n.state.Txs = append(n.state.Txs, tx)
 		}
 	}
-	return true
+	return true, nil
+}
+
+func (n *rpcNode) replayPeerBlock(block blockRecord) ([]txRecord, []receiptRecord, error) {
+	height := parseQuantity(block.Number).Uint64()
+	beforeHeight := n.state.Height
+	beforeSnapshot := n.currentStateSnapshot("", "")
+	beforeReceipts := copyReceiptMap(n.state.Receipts)
+	beforeLogs := append([]logRecord(nil), n.state.Logs...)
+	beforeTxs := append([]txRecord(nil), n.state.Txs...)
+	beforeWithdrawals := copyWithdrawalMap(n.state.Withdrawals)
+	beforeAnchors := copyAnchorMap(n.state.Anchors)
+	beforeCommits := append([]trieCommitRecord(nil), n.trieCommits...)
+	beforeReplayMode := n.replayMode
+	restore := func() {
+		n.state.Height = beforeHeight
+		n.restoreStateSnapshot(beforeSnapshot)
+		n.state.Receipts = beforeReceipts
+		n.state.Logs = beforeLogs
+		n.state.Txs = beforeTxs
+		n.state.Withdrawals = beforeWithdrawals
+		n.state.Anchors = beforeAnchors
+		n.trieCommits = beforeCommits
+		n.replayMode = beforeReplayMode
+	}
+
+	n.state.Height = height
+	n.replayMode = true
+	minedTxs := make([]txRecord, 0, len(block.Transactions))
+	receipts := make([]receiptRecord, 0, len(block.Transactions))
+	for i, tx := range block.Transactions {
+		mined, receipt := n.applyMinedTransaction(tx, block.Hash, height, uint64(i))
+		minedTxs = append(minedTxs, mined)
+		receipts = append(receipts, receipt)
+	}
+	stateRoot := buildStateTrieFromSnapshot(n.currentStateSnapshot(block.Hash, "")).Hash().Hex()
+	txRoot := hashJSON(minedTxs)
+	receiptRoot := receiptTrieRoot(receipts)
+	logsBloom := blockLogsBloomHex(receipts)
+
+	if !strings.EqualFold(block.StateRoot, stateRoot) {
+		restore()
+		return nil, nil, fmt.Errorf("peer block %d state root mismatch: got %s want %s", height, stateRoot, block.StateRoot)
+	}
+	if block.TxRoot != "" && !strings.EqualFold(block.TxRoot, txRoot) {
+		restore()
+		return nil, nil, fmt.Errorf("peer block %d replay tx root mismatch: got %s want %s", height, txRoot, block.TxRoot)
+	}
+	if block.ReceiptRoot != "" && !strings.EqualFold(block.ReceiptRoot, receiptRoot) {
+		restore()
+		return nil, nil, fmt.Errorf("peer block %d receipt root mismatch: got %s want %s", height, receiptRoot, block.ReceiptRoot)
+	}
+	if block.LogsBloom != "" && block.LogsBloom != zeroHash() && !strings.EqualFold(block.LogsBloom, logsBloom) {
+		restore()
+		return nil, nil, fmt.Errorf("peer block %d logs bloom mismatch: got %s want %s", height, logsBloom, block.LogsBloom)
+	}
+	n.replayMode = beforeReplayMode
+	return minedTxs, receipts, nil
 }
 
 func (n *rpcNode) consensusStatus() map[string]interface{} {
@@ -2103,6 +2188,31 @@ func copyNestedStringMap(input map[string]map[string]string) map[string]map[stri
 		for key, value := range slots {
 			out[account][normalizeStorageKey(key)] = value
 		}
+	}
+	return out
+}
+
+func copyReceiptMap(input map[string]receiptRecord) map[string]receiptRecord {
+	out := make(map[string]receiptRecord, len(input))
+	for key, receipt := range input {
+		receipt.Logs = append([]logRecord(nil), receipt.Logs...)
+		out[key] = receipt
+	}
+	return out
+}
+
+func copyWithdrawalMap(input map[string]withdrawalRecord) map[string]withdrawalRecord {
+	out := make(map[string]withdrawalRecord, len(input))
+	for key, withdrawal := range input {
+		out[key] = withdrawal
+	}
+	return out
+}
+
+func copyAnchorMap(input map[uint64]anchorRecord) map[uint64]anchorRecord {
+	out := make(map[uint64]anchorRecord, len(input))
+	for key, anchor := range input {
+		out[key] = anchor
 	}
 	return out
 }

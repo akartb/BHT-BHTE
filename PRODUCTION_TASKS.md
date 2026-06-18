@@ -31,12 +31,12 @@ operable infrastructure.
   pre-reorg snapshot, removes orphaned receipts/logs/snapshots/trie commits, and
   requeues transactions from removed blocks back into the pending pool.
 - BHTE peer sync can now fetch a bounded range of remote canonical blocks,
-  validate number/parent hash/state root/receipt root/transaction root, and import
-  the validated block summaries into the local canonical index.
-- Peer-imported BHTE block summaries are now recorded as incomplete
-  `peer-summary` state snapshots, so proof RPCs refuse to fabricate account or
-  storage proofs until the node has full execution replay or trusted state data
-  for that block.
+  validate number/parent hash/state root/receipt root/transaction root, replay
+  the block transactions through the local BHTE state machine, rebuild
+  state/receipt/log bloom roots, and import only blocks whose commitments match.
+- Peer-imported BHTE blocks that replay successfully now persist complete local
+  state snapshots and can answer proof RPCs. Incomplete `peer-summary` snapshots
+  are still recognized and proof-disabled for older or manually injected data.
 - BHTE does not yet implement a full Ethereum execution layer: opcode execution,
   gas/state transition rules, contract storage semantics, MPT proof generation,
   and consensus/P2P are still incomplete.
@@ -64,9 +64,9 @@ operable infrastructure.
 - Implement BHTE production consensus: block proposal, validation, fork choice,
   persistent canonical chain database, peer discovery, peer scoring, snap/header
   sync, and deterministic validator/miner configuration. Current status:
-  bounded peer block-summary sync exists; full execution replay, fork choice, and
-  peer scoring are still pending. Peer-imported summaries are explicitly marked
-  incomplete and cannot answer state proofs until replay/state-sync is available.
+  bounded peer block sync with local transaction replay and root verification
+  exists for the current simplified state machine; full fork choice, peer scoring,
+  validator/miner networking, and Ethereum-compatible execution are still pending.
 - Replace BHTE selector-level contract simulation with full EVM state
   transitions: opcode execution, gas accounting, refunds, CALL/CREATE/SELFDESTRUCT
   semantics, storage/account trie updates, bloom filters, and receipt roots.
@@ -77,10 +77,11 @@ operable infrastructure.
   trie commit lookup, node retrieval, and receipt verification from persisted
   nodes exists. Single-log proof helpers exist as local receipt-proof plus
   log-content verification. Historical account/storage proof snapshots exist for
-  retained locally executed blocks. Peer-synced block summaries are indexed but
-  proof-disabled. Remaining gaps: long-term database storage beyond JSON files,
-  pruning-safe node retention, state-sync or execution replay for peer blocks, and
-  validation of replacement branch state during deep reorgs.
+  retained locally executed and successfully replayed peer blocks. Incomplete
+  peer summaries remain proof-disabled. Remaining gaps: long-term database
+  storage beyond JSON files, pruning-safe node retention, state-sync for nodes
+  joining far behind, and validation of replacement branch state during deep
+  reorgs.
 - Add deterministic replay tests that rebuild chain state from genesis and
   compare state roots across nodes.
 

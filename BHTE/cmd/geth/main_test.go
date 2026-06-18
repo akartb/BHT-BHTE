@@ -466,32 +466,11 @@ func TestReorgRollsBackStateProofIndexesAndPendingTransactions(t *testing.T) {
 
 func TestSyncPeerImportsValidatedBlockRange(t *testing.T) {
 	node := newTestNode(t)
-	genesis := node.state.Blocks[len(node.state.Blocks)-1]
-
-	tx2 := []txRecord{{Hash: hashHex([]byte("peer-tx-2")), From: node.state.Accounts[0], To: "0x0000000000000000000000000000000000000300", Value: "0x1"}}
-	block2 := blockRecord{
-		Number:       "0x2",
-		Hash:         hashHex([]byte("peer-block-2")),
-		ParentHash:   genesis.Hash,
-		StateRoot:    hashHex([]byte("peer-state-2")),
-		TxRoot:       hashJSON(tx2),
-		ReceiptRoot:  hashHex([]byte("peer-receipts-2")),
-		LogsBloom:    zeroHash(),
-		Timestamp:    "0x2",
-		Transactions: tx2,
-	}
-	tx3 := []txRecord{{Hash: hashHex([]byte("peer-tx-3")), From: node.state.Accounts[0], To: "0x0000000000000000000000000000000000000301", Value: "0x2"}}
-	block3 := blockRecord{
-		Number:       "0x3",
-		Hash:         hashHex([]byte("peer-block-3")),
-		ParentHash:   block2.Hash,
-		StateRoot:    hashHex([]byte("peer-state-3")),
-		TxRoot:       hashJSON(tx3),
-		ReceiptRoot:  hashHex([]byte("peer-receipts-3")),
-		LogsBloom:    zeroHash(),
-		Timestamp:    "0x3",
-		Transactions: tx3,
-	}
+	peerNode := newTestNode(t)
+	mineTransfer(t, peerNode, "0x0000000000000000000000000000000000000300", "0x1")
+	mineTransfer(t, peerNode, "0x0000000000000000000000000000000000000301", "0x2")
+	block2 := peerNode.state.Blocks[1]
+	block3 := peerNode.state.Blocks[2]
 	server := newPeerRPCServer(t, map[string]interface{}{
 		"eth_blockNumber":      "0x3",
 		"eth_getBlockByNumber": map[string]blockRecord{"0x2": block2, "0x3": block3},
@@ -520,15 +499,44 @@ func TestSyncPeerImportsValidatedBlockRange(t *testing.T) {
 	if !ok {
 		t.Fatal("peer-imported block snapshot was not recorded")
 	}
-	if snapshot.Complete {
-		t.Fatalf("peer-imported snapshot marked complete: %#v", snapshot)
+	if !snapshot.Complete {
+		t.Fatalf("replayed peer snapshot marked incomplete: %#v", snapshot)
 	}
-	if snapshot.Source != "peer-summary" {
-		t.Fatalf("peer-imported snapshot source = %q, want peer-summary", snapshot.Source)
+	if snapshot.Source != "local" {
+		t.Fatalf("replayed peer snapshot source = %q, want local", snapshot.Source)
 	}
 	proofRaw, _ := json.Marshal([]interface{}{node.state.Accounts[0], []string{}, "latest"})
-	if _, err := node.call("eth_getProof", proofRaw); err == nil {
-		t.Fatal("expected eth_getProof on peer summary block to fail until full state replay exists")
+	if _, err := node.call("eth_getProof", proofRaw); err != nil {
+		t.Fatalf("eth_getProof on replayed peer block failed: %v", err)
+	}
+}
+
+func TestSyncPeerRejectsInvalidStateRoot(t *testing.T) {
+	node := newTestNode(t)
+	peerNode := newTestNode(t)
+	mineTransfer(t, peerNode, "0x0000000000000000000000000000000000000300", "0x1")
+	block2 := peerNode.state.Blocks[1]
+	block2.StateRoot = hashHex([]byte("wrong-state-root"))
+	server := newPeerRPCServer(t, map[string]interface{}{
+		"eth_blockNumber":      "0x2",
+		"eth_getBlockByNumber": map[string]blockRecord{"0x2": block2},
+	})
+	defer server.Close()
+
+	raw, _ := json.Marshal([]interface{}{server.URL})
+	result, err := node.call("bhte_syncPeer", raw)
+	if err != nil {
+		t.Fatalf("bhte_syncPeer returned RPC error: %v", err)
+	}
+	sync := result.(map[string]interface{})
+	if sync["synced"] != false {
+		t.Fatalf("invalid state root peer sync succeeded: %#v", sync)
+	}
+	if node.state.Height != 1 {
+		t.Fatalf("height after failed sync = %d, want 1", node.state.Height)
+	}
+	if len(node.state.Txs) != 0 || len(node.state.Logs) != 0 {
+		t.Fatalf("failed replay left tx/log state behind: txs=%d logs=%d", len(node.state.Txs), len(node.state.Logs))
 	}
 }
 
@@ -562,6 +570,19 @@ func TestSyncPeerRejectsInvalidParent(t *testing.T) {
 	}
 	if node.state.Height != 1 {
 		t.Fatalf("height after failed sync = %d, want 1", node.state.Height)
+	}
+}
+
+func mineTransfer(t *testing.T, node *rpcNode, to, value string) {
+	t.Helper()
+	raw, _ := json.Marshal([]interface{}{map[string]interface{}{
+		"from":  node.state.Accounts[0],
+		"to":    to,
+		"value": value,
+		"gas":   "0x5208",
+	}})
+	if _, err := node.call("eth_sendTransaction", raw); err != nil {
+		t.Fatalf("eth_sendTransaction failed: %v", err)
 	}
 }
 
