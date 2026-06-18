@@ -36,8 +36,24 @@ foreach ($package in $packages) {
         continue
     }
 
-    & $outPath "-test.timeout=10m"
-    if ($LASTEXITCODE -ne 0) {
+    $ran = $false
+    try {
+        if (-not (Test-Path -LiteralPath $outPath)) {
+            throw "compiled test binary disappeared: $outPath"
+        }
+        & $outPath "-test.timeout=10m"
+        if ($LASTEXITCODE -eq 0) {
+            $ran = $true
+        }
+    } catch {
+        Write-Warning "Failed to execute $outPath directly ($($_.Exception.Message)); falling back to go test $package"
+        go test -timeout=10m $package
+        if ($LASTEXITCODE -eq 0) {
+            $ran = $true
+        }
+    }
+
+    if (-not $ran) {
         $failed = $true
     }
 }

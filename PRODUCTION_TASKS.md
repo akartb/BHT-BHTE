@@ -30,6 +30,9 @@ operable infrastructure.
 - BHTE reorg handling now restores balances/nonces/code/storage from the
   pre-reorg snapshot, removes orphaned receipts/logs/snapshots/trie commits, and
   requeues transactions from removed blocks back into the pending pool.
+- BHTE peer sync can now fetch a bounded range of remote canonical blocks,
+  validate number/parent hash/state root/receipt root/transaction root, and import
+  the validated block summaries into the local canonical index.
 - BHTE does not yet implement a full Ethereum execution layer: opcode execution,
   gas/state transition rules, contract storage semantics, MPT proof generation,
   and consensus/P2P are still incomplete.
@@ -56,7 +59,9 @@ operable infrastructure.
   block index, mempool policy, mining template, difficulty adjustment, and RPC.
 - Implement BHTE production consensus: block proposal, validation, fork choice,
   persistent canonical chain database, peer discovery, peer scoring, snap/header
-  sync, and deterministic validator/miner configuration.
+  sync, and deterministic validator/miner configuration. Current status:
+  bounded peer block-summary sync exists; full execution replay, fork choice, and
+  peer scoring are still pending.
 - Replace BHTE selector-level contract simulation with full EVM state
   transitions: opcode execution, gas accounting, refunds, CALL/CREATE/SELFDESTRUCT
   semantics, storage/account trie updates, bloom filters, and receipt roots.

@@ -5,6 +5,8 @@ package main
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -460,4 +462,132 @@ func TestReorgRollsBackStateProofIndexesAndPendingTransactions(t *testing.T) {
 	if _, err := node.call("eth_getProof", block3ProofRaw); err == nil {
 		t.Fatal("expected block 3 proof to fail after reorg")
 	}
+}
+
+func TestSyncPeerImportsValidatedBlockRange(t *testing.T) {
+	node := newTestNode(t)
+	genesis := node.state.Blocks[len(node.state.Blocks)-1]
+
+	tx2 := []txRecord{{Hash: hashHex([]byte("peer-tx-2")), From: node.state.Accounts[0], To: "0x0000000000000000000000000000000000000300", Value: "0x1"}}
+	block2 := blockRecord{
+		Number:       "0x2",
+		Hash:         hashHex([]byte("peer-block-2")),
+		ParentHash:   genesis.Hash,
+		StateRoot:    hashHex([]byte("peer-state-2")),
+		TxRoot:       hashJSON(tx2),
+		ReceiptRoot:  hashHex([]byte("peer-receipts-2")),
+		LogsBloom:    zeroHash(),
+		Timestamp:    "0x2",
+		Transactions: tx2,
+	}
+	tx3 := []txRecord{{Hash: hashHex([]byte("peer-tx-3")), From: node.state.Accounts[0], To: "0x0000000000000000000000000000000000000301", Value: "0x2"}}
+	block3 := blockRecord{
+		Number:       "0x3",
+		Hash:         hashHex([]byte("peer-block-3")),
+		ParentHash:   block2.Hash,
+		StateRoot:    hashHex([]byte("peer-state-3")),
+		TxRoot:       hashJSON(tx3),
+		ReceiptRoot:  hashHex([]byte("peer-receipts-3")),
+		LogsBloom:    zeroHash(),
+		Timestamp:    "0x3",
+		Transactions: tx3,
+	}
+	server := newPeerRPCServer(t, map[string]interface{}{
+		"eth_blockNumber":      "0x3",
+		"eth_getBlockByNumber": map[string]blockRecord{"0x2": block2, "0x3": block3},
+	})
+	defer server.Close()
+
+	raw, _ := json.Marshal([]interface{}{server.URL})
+	result, err := node.call("bhte_syncPeer", raw)
+	if err != nil {
+		t.Fatalf("bhte_syncPeer failed: %v", err)
+	}
+	sync := result.(map[string]interface{})
+	if sync["synced"] != true || sync["imported"] != 2 {
+		t.Fatalf("unexpected sync result: %#v", sync)
+	}
+	if node.state.Height != 3 {
+		t.Fatalf("height after sync = %d, want 3", node.state.Height)
+	}
+	if node.state.Canonical[2] != block2.Hash || node.state.Canonical[3] != block3.Hash {
+		t.Fatalf("canonical chain not imported: %#v", node.state.Canonical)
+	}
+	if len(node.state.Txs) != 2 {
+		t.Fatalf("imported tx count = %d, want 2", len(node.state.Txs))
+	}
+}
+
+func TestSyncPeerRejectsInvalidParent(t *testing.T) {
+	node := newTestNode(t)
+	badBlock := blockRecord{
+		Number:       "0x2",
+		Hash:         hashHex([]byte("bad-peer-block-2")),
+		ParentHash:   hashHex([]byte("wrong-parent")),
+		StateRoot:    hashHex([]byte("bad-peer-state-2")),
+		TxRoot:       hashJSON([]txRecord{}),
+		ReceiptRoot:  hashHex([]byte("bad-peer-receipts-2")),
+		LogsBloom:    zeroHash(),
+		Timestamp:    "0x2",
+		Transactions: []txRecord{},
+	}
+	server := newPeerRPCServer(t, map[string]interface{}{
+		"eth_blockNumber":      "0x2",
+		"eth_getBlockByNumber": map[string]blockRecord{"0x2": badBlock},
+	})
+	defer server.Close()
+
+	raw, _ := json.Marshal([]interface{}{server.URL})
+	result, err := node.call("bhte_syncPeer", raw)
+	if err != nil {
+		t.Fatalf("bhte_syncPeer returned RPC error: %v", err)
+	}
+	sync := result.(map[string]interface{})
+	if sync["synced"] != false {
+		t.Fatalf("invalid parent peer sync succeeded: %#v", sync)
+	}
+	if node.state.Height != 1 {
+		t.Fatalf("height after failed sync = %d, want 1", node.state.Height)
+	}
+}
+
+func newPeerRPCServer(t *testing.T, responses map[string]interface{}) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			ID     interface{}       `json:"id"`
+			Method string            `json:"method"`
+			Params []json.RawMessage `json:"params"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode peer rpc request: %v", err)
+		}
+		var result interface{}
+		switch req.Method {
+		case "eth_blockNumber":
+			result = responses[req.Method]
+		case "eth_getBlockByNumber":
+			var number string
+			if len(req.Params) == 0 {
+				t.Fatal("eth_getBlockByNumber missing number param")
+			}
+			if err := json.Unmarshal(req.Params[0], &number); err != nil {
+				t.Fatalf("decode block number: %v", err)
+			}
+			blocks := responses[req.Method].(map[string]blockRecord)
+			block, ok := blocks[number]
+			if !ok {
+				t.Fatalf("missing peer block %s", number)
+			}
+			result = block
+		default:
+			t.Fatalf("unexpected peer rpc method %s", req.Method)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"jsonrpc": "2.0",
+			"id":      req.ID,
+			"result":  result,
+		})
+	}))
 }

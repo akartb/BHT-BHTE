@@ -38,6 +38,8 @@ var (
 	BuildTime = ""
 )
 
+const maxPeerSyncBlocks = 128
+
 func main() {
 	fmt.Println("BHTE zkEVM - Layer 2 Payment Engine")
 	fmt.Printf("Version: %s\n", Version)
@@ -1456,9 +1458,96 @@ func (n *rpcNode) syncPeer(idOrURL string) map[string]interface{} {
 	}
 	peer.Height = parseQuantity(remoteHeight).Uint64()
 	peer.LastSeen = time.Now().Unix()
+	imported := 0
+	if peer.Height > n.state.Height {
+		count, err := n.syncPeerBlocks(&peer, n.state.Height+1, peer.Height)
+		if err != nil {
+			n.state.Peers[peer.ID] = peer
+			n.save()
+			return map[string]interface{}{"synced": false, "peer": peer, "error": err.Error(), "imported": imported}
+		}
+		imported = count
+	}
+	if n.state.Height > 0 {
+		peer.BestHash = n.state.Blocks[len(n.state.Blocks)-1].Hash
+	}
 	n.state.Peers[peer.ID] = peer
 	n.save()
-	return map[string]interface{}{"synced": true, "peer": peer, "localHeight": toHex(n.state.Height)}
+	return map[string]interface{}{
+		"synced":       true,
+		"peer":         peer,
+		"localHeight":  toHex(n.state.Height),
+		"remoteHeight": toHex(peer.Height),
+		"imported":     imported,
+	}
+}
+
+func (n *rpcNode) syncPeerBlocks(peer *peerRecord, startHeight, endHeight uint64) (int, error) {
+	imported := 0
+	for height := startHeight; height <= endHeight && imported < maxPeerSyncBlocks; height++ {
+		var block blockRecord
+		if err := callExternalRPC(peer.URL, "eth_getBlockByNumber", []interface{}{toHex(height), true}, &block); err != nil {
+			return imported, fmt.Errorf("failed to fetch peer block %d: %w", height, err)
+		}
+		if err := n.validatePeerBlock(block, height); err != nil {
+			return imported, err
+		}
+		n.importPeerBlock(block)
+		imported++
+	}
+	return imported, nil
+}
+
+func (n *rpcNode) validatePeerBlock(block blockRecord, expectedHeight uint64) error {
+	if block.Hash == "" || block.Hash == zeroHash() {
+		return fmt.Errorf("peer block %d missing hash", expectedHeight)
+	}
+	if block.StateRoot == "" || block.StateRoot == zeroHash() {
+		return fmt.Errorf("peer block %d missing state root", expectedHeight)
+	}
+	if block.ReceiptRoot == "" {
+		return fmt.Errorf("peer block %d missing receipt root", expectedHeight)
+	}
+	if parseQuantity(block.Number).Uint64() != expectedHeight {
+		return fmt.Errorf("peer block number mismatch: got %s want %s", block.Number, toHex(expectedHeight))
+	}
+	expectedParent := n.state.Canonical[expectedHeight-1]
+	if expectedParent == "" && len(n.state.Blocks) > 0 {
+		expectedParent = n.state.Blocks[len(n.state.Blocks)-1].Hash
+	}
+	if expectedHeight > 1 && !strings.EqualFold(block.ParentHash, expectedParent) {
+		return fmt.Errorf("peer block %d parent mismatch: got %s want %s", expectedHeight, block.ParentHash, expectedParent)
+	}
+	expectedTxRoot := hashJSON(block.Transactions)
+	if block.TxRoot != "" && !strings.EqualFold(block.TxRoot, expectedTxRoot) {
+		return fmt.Errorf("peer block %d tx root mismatch: got %s want %s", expectedHeight, block.TxRoot, expectedTxRoot)
+	}
+	return nil
+}
+
+func (n *rpcNode) importPeerBlock(block blockRecord) {
+	height := parseQuantity(block.Number).Uint64()
+	n.state.Height = height
+	n.state.Blocks = append(n.state.Blocks, block)
+	n.state.Canonical[height] = block.Hash
+	n.state.Anchors[height] = anchorRecord{
+		Height:    height,
+		StateRoot: block.StateRoot,
+		BlockHash: block.Hash,
+		TxHash:    block.TxRoot,
+		Timestamp: time.Now().Unix(),
+		Verified:  true,
+	}
+	for i := range block.Transactions {
+		tx := block.Transactions[i]
+		tx.BlockHash = block.Hash
+		tx.BlockNumber = block.Number
+		tx.TransactionIndex = toHex(uint64(i))
+		tx.Confirmations = 1
+		if _, exists := n.transactionByHash(tx.Hash); !exists {
+			n.state.Txs = append(n.state.Txs, tx)
+		}
+	}
 }
 
 func (n *rpcNode) consensusStatus() map[string]interface{} {
