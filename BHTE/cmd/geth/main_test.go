@@ -228,3 +228,78 @@ func TestLogProofRoundTrip(t *testing.T) {
 		t.Fatalf("tampered log proof verified: %#v", verification)
 	}
 }
+
+func TestTrieDatabaseNodeLookupAndReceiptVerification(t *testing.T) {
+	node := newTestNode(t)
+	from := node.state.Accounts[0]
+
+	raw, _ := json.Marshal([]interface{}{map[string]interface{}{
+		"from":  from,
+		"to":    node.bridgeAddress,
+		"value": "0x3",
+		"gas":   "0x5208",
+		"data":  "withdraw",
+	}})
+	txResult, err := node.call("eth_sendTransaction", raw)
+	if err != nil {
+		t.Fatalf("eth_sendTransaction failed: %v", err)
+	}
+	txHash := txResult.(string)
+	latest := node.state.Blocks[len(node.state.Blocks)-1]
+
+	commitsRaw, _ := json.Marshal([]interface{}{"receipts", "0x2"})
+	commitsResult, err := node.call("bhte_getTrieCommits", commitsRaw)
+	if err != nil {
+		t.Fatalf("bhte_getTrieCommits failed: %v", err)
+	}
+	commits := commitsResult.([]trieCommitRecord)
+	if len(commits) == 0 {
+		t.Fatal("receipt trie commit was not returned")
+	}
+	if commits[0].Root != latest.ReceiptRoot {
+		t.Fatalf("receipt commit root = %s, want %s", commits[0].Root, latest.ReceiptRoot)
+	}
+	if len(commits[0].Nodes) == 0 {
+		t.Fatal("receipt trie commit has no nodes")
+	}
+
+	nodeRaw, _ := json.Marshal([]interface{}{latest.ReceiptRoot, commits[0].Nodes[0].Hash})
+	nodeResult, err := node.call("bhte_getTrieNode", nodeRaw)
+	if err != nil {
+		t.Fatalf("bhte_getTrieNode failed: %v", err)
+	}
+	nodeRecord := nodeResult.(map[string]interface{})
+	if nodeRecord["blob"] == "" {
+		t.Fatalf("trie node blob was empty: %#v", nodeRecord)
+	}
+
+	receipt := node.state.Receipts[strings.ToLower(txHash)]
+	verifyRaw, _ := json.Marshal([]interface{}{map[string]interface{}{
+		"receiptRoot":      latest.ReceiptRoot,
+		"transactionIndex": "0x0",
+		"receipt":          receipt,
+	}})
+	verifyResult, err := node.call("bhte_verifyReceiptInTrie", verifyRaw)
+	if err != nil {
+		t.Fatalf("bhte_verifyReceiptInTrie failed: %v", err)
+	}
+	verification := verifyResult.(map[string]interface{})
+	if verification["valid"] != true {
+		t.Fatalf("receipt did not verify from trie database: %#v", verification)
+	}
+
+	receipt.Status = "0x0"
+	verifyRaw, _ = json.Marshal([]interface{}{map[string]interface{}{
+		"receiptRoot":      latest.ReceiptRoot,
+		"transactionIndex": "0x0",
+		"receipt":          receipt,
+	}})
+	verifyResult, err = node.call("bhte_verifyReceiptInTrie", verifyRaw)
+	if err != nil {
+		t.Fatalf("tampered bhte_verifyReceiptInTrie failed: %v", err)
+	}
+	verification = verifyResult.(map[string]interface{})
+	if verification["valid"] != false {
+		t.Fatalf("tampered receipt verified from trie database: %#v", verification)
+	}
+}

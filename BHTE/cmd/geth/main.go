@@ -665,6 +665,12 @@ func (n *rpcNode) call(method string, raw json.RawMessage) (interface{}, error) 
 	case "bhte_getTrieCommit":
 		params := parseParams(raw)
 		return n.getTrieCommit(stringParam(params, 0)), nil
+	case "bhte_getTrieCommits":
+		params := parseParams(raw)
+		return n.getTrieCommits(stringParam(params, 0), quantityParam(params, 1)), nil
+	case "bhte_getTrieNode":
+		params := parseParams(raw)
+		return n.getTrieNode(stringParam(params, 0), stringParam(params, 1))
 	case "bhte_getReceiptProof":
 		params := parseParams(raw)
 		return n.receiptProof(stringParam(params, 0))
@@ -675,6 +681,13 @@ func (n *rpcNode) call(method string, raw json.RawMessage) (interface{}, error) 
 			return nil, err
 		}
 		return n.verifyReceiptProof(proof), nil
+	case "bhte_verifyReceiptInTrie":
+		params := parseParams(raw)
+		request, err := objectParam(params, 0)
+		if err != nil {
+			return nil, err
+		}
+		return n.verifyReceiptInTrie(request), nil
 	case "bhte_getLogProof":
 		params := parseParams(raw)
 		return n.logProof(stringParam(params, 0), quantityParam(params, 1))
@@ -1405,13 +1418,59 @@ func (n *rpcNode) validateBlockObject(block map[string]interface{}) map[string]i
 }
 
 func (n *rpcNode) getTrieCommit(root string) interface{} {
+	commit, ok := n.trieCommitByRoot(root)
+	if !ok {
+		return nil
+	}
+	return commit
+}
+
+func (n *rpcNode) trieCommitByRoot(root string) (trieCommitRecord, bool) {
 	root = strings.ToLower(root)
 	for i := len(n.trieCommits) - 1; i >= 0; i-- {
 		if strings.ToLower(n.trieCommits[i].Root) == root {
-			return n.trieCommits[i]
+			return n.trieCommits[i], true
 		}
 	}
-	return nil
+	return trieCommitRecord{}, false
+}
+
+func (n *rpcNode) getTrieCommits(kind string, height uint64) []trieCommitRecord {
+	kind = strings.TrimSpace(kind)
+	result := make([]trieCommitRecord, 0)
+	for i := len(n.trieCommits) - 1; i >= 0; i-- {
+		commit := n.trieCommits[i]
+		if kind != "" && commit.Kind != kind {
+			continue
+		}
+		if height != 0 && commit.Height != height {
+			continue
+		}
+		result = append(result, commit)
+	}
+	return result
+}
+
+func (n *rpcNode) getTrieNode(root, hash string) (map[string]interface{}, error) {
+	commit, ok := n.trieCommitByRoot(root)
+	if !ok {
+		return nil, fmt.Errorf("trie commit not found")
+	}
+	hash = strings.ToLower(hash)
+	for _, node := range commit.Nodes {
+		if strings.ToLower(node.Hash) == hash {
+			return map[string]interface{}{
+				"root":    commit.Root,
+				"kind":    commit.Kind,
+				"height":  toHex(commit.Height),
+				"hash":    node.Hash,
+				"path":    node.Path,
+				"blob":    node.Blob,
+				"deleted": node.Deleted,
+			}, nil
+		}
+	}
+	return nil, fmt.Errorf("trie node not found")
 }
 
 func (n *rpcNode) receiptProof(txHash string) (map[string]interface{}, error) {
@@ -1486,6 +1545,49 @@ func (n *rpcNode) verifyReceiptProof(proof map[string]interface{}) map[string]in
 		"receiptRoot":     root.Hex(),
 		"transactionHash": receipt.TransactionHash,
 		"blockHash":       receipt.BlockHash,
+	}
+}
+
+func (n *rpcNode) verifyReceiptInTrie(request map[string]interface{}) map[string]interface{} {
+	root := common.HexToHash(fmt.Sprint(request["receiptRoot"]))
+	index := quantityFromInterface(request["transactionIndex"])
+	commit, ok := n.trieCommitByRoot(root.Hex())
+	if !ok {
+		return map[string]interface{}{"valid": false, "message": "trie commit not found"}
+	}
+	proofDB, err := proofSetFromCommit(commit)
+	if err != nil {
+		return map[string]interface{}{"valid": false, "message": err.Error()}
+	}
+	key, _ := rlp.EncodeToBytes(uint(index))
+	value, err := trie.VerifyProof(root, key, proofDB)
+	if err != nil {
+		return map[string]interface{}{"valid": false, "message": err.Error()}
+	}
+	if len(value) == 0 {
+		return map[string]interface{}{"valid": false, "message": "receipt not present in trie"}
+	}
+	receipt, err := receiptFromInterface(request["receipt"])
+	if err != nil {
+		return map[string]interface{}{"valid": false, "message": err.Error()}
+	}
+	expected, err := rlp.EncodeToBytes(receipt.toGethReceipt())
+	if err != nil {
+		return map[string]interface{}{"valid": false, "message": err.Error()}
+	}
+	valid := bytes.Equal(value, expected)
+	message := "receipt trie value mismatch"
+	if valid {
+		message = "receipt verified from trie database"
+	}
+	return map[string]interface{}{
+		"valid":           valid,
+		"message":         message,
+		"receiptRoot":     root.Hex(),
+		"transactionHash": receipt.TransactionHash,
+		"blockHash":       receipt.BlockHash,
+		"commitKind":      commit.Kind,
+		"commitHeight":    toHex(commit.Height),
 	}
 }
 
@@ -1673,6 +1775,45 @@ func proofSetFromHex(nodes []string) (*trienode.ProofSet, error) {
 		proof = append(proof, blob)
 	}
 	return proof.Set(), nil
+}
+
+func proofSetFromCommit(commit trieCommitRecord) (*trienode.ProofSet, error) {
+	proof := trienode.NewProofSet()
+	for _, node := range commit.Nodes {
+		if node.Deleted {
+			continue
+		}
+		hash := common.FromHex(node.Hash)
+		blob := common.FromHex(node.Blob)
+		if len(hash) == 0 || len(blob) == 0 {
+			continue
+		}
+		if err := proof.Put(hash, blob); err != nil {
+			return nil, err
+		}
+	}
+	if proof.KeyCount() == 0 {
+		return nil, fmt.Errorf("trie commit has no readable nodes")
+	}
+	return proof, nil
+}
+
+func receiptFromInterface(value interface{}) (receiptRecord, error) {
+	var receipt receiptRecord
+	if value == nil {
+		return receipt, fmt.Errorf("missing receipt object")
+	}
+	data, err := json.Marshal(value)
+	if err != nil {
+		return receipt, err
+	}
+	if err := json.Unmarshal(data, &receipt); err != nil {
+		return receipt, err
+	}
+	if receipt.TransactionHash == "" {
+		return receipt, fmt.Errorf("missing receipt transaction hash")
+	}
+	return receipt, nil
 }
 
 func receiptBloomHex(receipt receiptRecord) string {
