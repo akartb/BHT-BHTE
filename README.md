@@ -92,6 +92,7 @@ Key fixes made:
   genesis snapshot without mutating live node state.
 - Upgraded `bhte_validateBlock` from header-only checks to candidate block
   replay validation against the parent state snapshot.
+- Added basic peer scoring and temporary bans for repeated invalid sync attempts.
 
 ### BHTWalletPro
 

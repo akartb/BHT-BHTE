@@ -38,7 +38,14 @@ var (
 	BuildTime = ""
 )
 
-const maxPeerSyncBlocks = 128
+const (
+	maxPeerSyncBlocks  = 128
+	peerScoreInitial   = 100
+	peerScoreMax       = 100
+	peerFailurePenalty = 25
+	peerSuccessReward  = 5
+	peerBanSeconds     = 10 * 60
+)
 
 func main() {
 	fmt.Println("BHTE zkEVM - Layer 2 Payment Engine")
@@ -176,12 +183,15 @@ type anchorRecord struct {
 }
 
 type peerRecord struct {
-	ID       string `json:"id"`
-	URL      string `json:"url"`
-	Height   uint64 `json:"height"`
-	BestHash string `json:"bestHash"`
-	LastSeen int64  `json:"lastSeen"`
-	Trusted  bool   `json:"trusted"`
+	ID          string `json:"id"`
+	URL         string `json:"url"`
+	Height      uint64 `json:"height"`
+	BestHash    string `json:"bestHash"`
+	LastSeen    int64  `json:"lastSeen"`
+	Trusted     bool   `json:"trusted"`
+	Score       int    `json:"score"`
+	Failures    int    `json:"failures"`
+	BannedUntil int64  `json:"bannedUntil,omitempty"`
 }
 
 type trieNodeRecord struct {
@@ -442,6 +452,12 @@ func (n *rpcNode) ensureState() {
 	}
 	if n.state.Peers == nil {
 		n.state.Peers = map[string]peerRecord{}
+	}
+	for id, peer := range n.state.Peers {
+		if peer.Score == 0 && peer.Failures == 0 && peer.BannedUntil == 0 {
+			peer.Score = peerScoreInitial
+			n.state.Peers[id] = peer
+		}
 	}
 	if len(n.state.Blocks) == 0 {
 		n.state.Blocks = append(n.state.Blocks, n.genesisBlock())
@@ -1482,6 +1498,7 @@ func (n *rpcNode) addPeer(url string) peerRecord {
 		BestHash: n.state.Blocks[len(n.state.Blocks)-1].Hash,
 		LastSeen: time.Now().Unix(),
 		Trusted:  strings.HasPrefix(url, "http://127.0.0.1") || strings.HasPrefix(url, "http://localhost"),
+		Score:    peerScoreInitial,
 	}
 	n.state.Peers[id] = peer
 	n.save()
@@ -1497,6 +1514,31 @@ func (n *rpcNode) peerList() []peerRecord {
 	return peers
 }
 
+func (n *rpcNode) recordPeerFailure(peer peerRecord) peerRecord {
+	peer.Failures++
+	peer.Score -= peerFailurePenalty
+	if peer.Score < 0 {
+		peer.Score = 0
+	}
+	peer.Trusted = false
+	peer.LastSeen = time.Now().Unix()
+	if peer.Score == 0 {
+		peer.BannedUntil = time.Now().Unix() + peerBanSeconds
+	}
+	return peer
+}
+
+func (n *rpcNode) recordPeerSuccess(peer peerRecord) peerRecord {
+	peer.Failures = 0
+	peer.Score += peerSuccessReward
+	if peer.Score > peerScoreMax {
+		peer.Score = peerScoreMax
+	}
+	peer.BannedUntil = 0
+	peer.LastSeen = time.Now().Unix()
+	return peer
+}
+
 func (n *rpcNode) syncPeer(idOrURL string) map[string]interface{} {
 	var peer peerRecord
 	for _, candidate := range n.state.Peers {
@@ -1508,8 +1550,19 @@ func (n *rpcNode) syncPeer(idOrURL string) map[string]interface{} {
 	if peer.URL == "" {
 		peer = n.addPeer(idOrURL)
 	}
+	if peer.BannedUntil > time.Now().Unix() {
+		return map[string]interface{}{
+			"synced":      false,
+			"peer":        peer,
+			"error":       "peer is temporarily banned",
+			"bannedUntil": toHex(uint64(peer.BannedUntil)),
+		}
+	}
 	var remoteHeight string
 	if err := callExternalRPC(peer.URL, "eth_blockNumber", []interface{}{}, &remoteHeight); err != nil {
+		peer = n.recordPeerFailure(peer)
+		n.state.Peers[peer.ID] = peer
+		n.save()
 		return map[string]interface{}{"synced": false, "peer": peer, "error": err.Error()}
 	}
 	peer.Height = parseQuantity(remoteHeight).Uint64()
@@ -1518,6 +1571,7 @@ func (n *rpcNode) syncPeer(idOrURL string) map[string]interface{} {
 	if peer.Height > n.state.Height {
 		count, err := n.syncPeerBlocks(&peer, n.state.Height+1, peer.Height)
 		if err != nil {
+			peer = n.recordPeerFailure(peer)
 			n.state.Peers[peer.ID] = peer
 			n.save()
 			return map[string]interface{}{"synced": false, "peer": peer, "error": err.Error(), "imported": imported}
@@ -1527,6 +1581,7 @@ func (n *rpcNode) syncPeer(idOrURL string) map[string]interface{} {
 	if n.state.Height > 0 {
 		peer.BestHash = n.state.Blocks[len(n.state.Blocks)-1].Hash
 	}
+	peer = n.recordPeerSuccess(peer)
 	n.state.Peers[peer.ID] = peer
 	n.save()
 	return map[string]interface{}{

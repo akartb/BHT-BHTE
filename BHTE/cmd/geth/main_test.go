@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func newTestNode(t *testing.T) *rpcNode {
@@ -495,6 +496,11 @@ func TestSyncPeerImportsValidatedBlockRange(t *testing.T) {
 	if len(node.state.Txs) != 2 {
 		t.Fatalf("imported tx count = %d, want 2", len(node.state.Txs))
 	}
+	peerID := hashHex([]byte(server.URL))
+	peer := node.state.Peers[peerID]
+	if peer.Score != peerScoreMax || peer.Failures != 0 || peer.BannedUntil != 0 {
+		t.Fatalf("healthy peer score not retained: %#v", peer)
+	}
 	snapshot, ok := node.state.StateSnapshots[3]
 	if !ok {
 		t.Fatal("peer-imported block snapshot was not recorded")
@@ -570,6 +576,50 @@ func TestSyncPeerRejectsInvalidParent(t *testing.T) {
 	}
 	if node.state.Height != 1 {
 		t.Fatalf("height after failed sync = %d, want 1", node.state.Height)
+	}
+}
+
+func TestSyncPeerScoresAndBansInvalidPeer(t *testing.T) {
+	node := newTestNode(t)
+	badBlock := blockRecord{
+		Number:       "0x2",
+		Hash:         hashHex([]byte("repeat-bad-peer-block-2")),
+		ParentHash:   hashHex([]byte("wrong-parent")),
+		StateRoot:    hashHex([]byte("repeat-bad-peer-state-2")),
+		TxRoot:       hashJSON([]txRecord{}),
+		ReceiptRoot:  hashHex([]byte("repeat-bad-peer-receipts-2")),
+		LogsBloom:    zeroHash(),
+		Timestamp:    "0x2",
+		Transactions: []txRecord{},
+	}
+	server := newPeerRPCServer(t, map[string]interface{}{
+		"eth_blockNumber":      "0x2",
+		"eth_getBlockByNumber": map[string]blockRecord{"0x2": badBlock},
+	})
+	defer server.Close()
+
+	raw, _ := json.Marshal([]interface{}{server.URL})
+	for i := 0; i < 4; i++ {
+		result, err := node.call("bhte_syncPeer", raw)
+		if err != nil {
+			t.Fatalf("bhte_syncPeer returned RPC error: %v", err)
+		}
+		sync := result.(map[string]interface{})
+		if sync["synced"] != false {
+			t.Fatalf("invalid peer sync %d succeeded: %#v", i, sync)
+		}
+	}
+	peer := node.state.Peers[hashHex([]byte(server.URL))]
+	if peer.Score != 0 || peer.Failures != 4 || peer.BannedUntil <= time.Now().Unix() {
+		t.Fatalf("invalid peer was not banned after repeated failures: %#v", peer)
+	}
+	result, err := node.call("bhte_syncPeer", raw)
+	if err != nil {
+		t.Fatalf("banned bhte_syncPeer returned RPC error: %v", err)
+	}
+	sync := result.(map[string]interface{})
+	if sync["synced"] != false || sync["error"] != "peer is temporarily banned" {
+		t.Fatalf("banned peer sync did not short-circuit: %#v", sync)
 	}
 }
 
