@@ -98,6 +98,8 @@ Key fixes made:
 - Added `bhte_chain.json` as a separate chain database file for blocks,
   canonical mappings, and block index data, while keeping old state JSON
   compatibility.
+- Added `bhte_state_db.json` as a separate state database file for accounts,
+  balances, nonces, code, storage, and state snapshots.
 
 ### BHTWalletPro
 

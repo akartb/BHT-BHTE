@@ -51,6 +51,46 @@ func TestChainDBPersistsAndReloadsCanonicalIndex(t *testing.T) {
 	}
 }
 
+func TestStateDBPersistsAndReloadsWithoutLegacyStateFile(t *testing.T) {
+	dir := t.TempDir()
+	node, err := newRPCNode([]string{"--datadir", dir, "--dev-insecure"})
+	if err != nil {
+		t.Fatalf("newRPCNode failed: %v", err)
+	}
+	account := "0x0000000000000000000000000000000000000400"
+	slot := zeroHash()
+	node.state.Accounts = append(node.state.Accounts, account)
+	node.state.Balances[account] = "0x123"
+	node.state.Nonces[account] = 9
+	node.state.Code[account] = "0x6001600055"
+	node.state.Storage[account] = map[string]string{slot: "0x2a"}
+	node.storeStateSnapshot(node.state.Height, node.state.Blocks[len(node.state.Blocks)-1].Hash, node.computeStateTrieRoot())
+	node.save()
+	if _, err := os.Stat(node.stateDBFile); err != nil {
+		t.Fatalf("state DB was not written: %v", err)
+	}
+	if err := os.Remove(node.stateFile); err != nil {
+		t.Fatalf("remove legacy state file: %v", err)
+	}
+
+	reloaded, err := newRPCNode([]string{"--datadir", dir, "--dev-insecure"})
+	if err != nil {
+		t.Fatalf("reload newRPCNode failed: %v", err)
+	}
+	if reloaded.state.Balances[account] != "0x123" || reloaded.state.Nonces[account] != 9 {
+		t.Fatalf("reloaded account state mismatch: balance=%s nonce=%d", reloaded.state.Balances[account], reloaded.state.Nonces[account])
+	}
+	if reloaded.state.Code[account] != "0x6001600055" {
+		t.Fatalf("reloaded code mismatch: %s", reloaded.state.Code[account])
+	}
+	if reloaded.state.Storage[account][slot] != "0x2a" {
+		t.Fatalf("reloaded storage mismatch: %#v", reloaded.state.Storage[account])
+	}
+	if _, ok := reloaded.state.StateSnapshots[1]; !ok {
+		t.Fatal("reloaded state snapshot missing")
+	}
+}
+
 func TestEthGetProofUsesStateAndStorageTries(t *testing.T) {
 	node := newTestNode(t)
 	addr := "0x0000000000000000000000000000000000000201"

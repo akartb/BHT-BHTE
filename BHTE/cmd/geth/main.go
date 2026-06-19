@@ -242,6 +242,17 @@ type chainDBRecord struct {
 	UpdatedAt  int64                       `json:"updatedAt"`
 }
 
+type stateDBRecord struct {
+	Version        int                            `json:"version"`
+	Accounts       []string                       `json:"accounts"`
+	Balances       map[string]string              `json:"balances"`
+	Nonces         map[string]uint64              `json:"nonces"`
+	Code           map[string]string              `json:"code"`
+	Storage        map[string]map[string]string   `json:"storage"`
+	StateSnapshots map[uint64]stateSnapshotRecord `json:"stateSnapshots"`
+	UpdatedAt      int64                          `json:"updatedAt"`
+}
+
 type nodeState struct {
 	Height         uint64                         `json:"height"`
 	Accounts       []string                       `json:"accounts"`
@@ -271,6 +282,7 @@ type rpcNode struct {
 	server           *http.Server
 	stateFile        string
 	chainFile        string
+	stateDBFile      string
 	trieFile         string
 	trieCommits      []trieCommitRecord
 	bridgeAddress    string
@@ -372,9 +384,11 @@ func newRPCNode(args []string) (*rpcNode, error) {
 	}
 	node.stateFile = filepath.Join(node.dataDir, "bhte_state.json")
 	node.chainFile = filepath.Join(node.dataDir, "bhte_chain.json")
+	node.stateDBFile = filepath.Join(node.dataDir, "bhte_state_db.json")
 	node.trieFile = filepath.Join(node.dataDir, "bhte_trie_nodes.json")
 	node.load()
 	node.loadChainDB()
+	node.loadStateDB()
 	node.loadTrieDB()
 	node.ensureState()
 	return node, nil
@@ -426,6 +440,35 @@ func (n *rpcNode) loadChainDB() {
 	}
 	if chain.BlockIndex != nil {
 		n.state.BlockIndex = chain.BlockIndex
+	}
+}
+
+func (n *rpcNode) loadStateDB() {
+	data, err := os.ReadFile(n.stateDBFile)
+	if err != nil {
+		return
+	}
+	var stateDB stateDBRecord
+	if json.Unmarshal(data, &stateDB) != nil {
+		return
+	}
+	if len(stateDB.Accounts) > 0 {
+		n.state.Accounts = stateDB.Accounts
+	}
+	if stateDB.Balances != nil {
+		n.state.Balances = stateDB.Balances
+	}
+	if stateDB.Nonces != nil {
+		n.state.Nonces = stateDB.Nonces
+	}
+	if stateDB.Code != nil {
+		n.state.Code = stateDB.Code
+	}
+	if stateDB.Storage != nil {
+		n.state.Storage = stateDB.Storage
+	}
+	if stateDB.StateSnapshots != nil {
+		n.state.StateSnapshots = stateDB.StateSnapshots
 	}
 }
 
@@ -533,11 +576,32 @@ func (n *rpcNode) save() {
 		_ = os.WriteFile(n.stateFile, data, 0o600)
 	}
 	n.saveChainDB()
+	n.saveStateDB()
 	if n.trieFile != "" {
 		trieData, err := json.MarshalIndent(n.trieCommits, "", "  ")
 		if err == nil {
 			_ = os.WriteFile(n.trieFile, trieData, 0o600)
 		}
+	}
+}
+
+func (n *rpcNode) saveStateDB() {
+	if n.stateDBFile == "" {
+		return
+	}
+	stateDB := stateDBRecord{
+		Version:        1,
+		Accounts:       n.state.Accounts,
+		Balances:       n.state.Balances,
+		Nonces:         n.state.Nonces,
+		Code:           n.state.Code,
+		Storage:        n.state.Storage,
+		StateSnapshots: n.state.StateSnapshots,
+		UpdatedAt:      time.Now().Unix(),
+	}
+	data, err := json.MarshalIndent(stateDB, "", "  ")
+	if err == nil {
+		_ = os.WriteFile(n.stateDBFile, data, 0o600)
 	}
 }
 
