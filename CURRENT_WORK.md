@@ -27,7 +27,8 @@ Last updated: 2026-06-19
 3. 把 reorg 从简单改高度推进到能恢复余额、nonce、code、storage、receipt、log、trie commit 和 pending tx。
 4. 把 peer sync 从“相信远端区块摘要”推进到“本地重放远端交易，重建 stateRoot/receiptRoot/logsBloom，匹配后才导入”。
 5. 把本地 canonical chain 从“存着一串区块”推进到“可以从 genesis 审计式重放，确认每个区块承诺能复现”。
-6. 把文档从乐观项目介绍改成诚实工程说明，明确哪些链路已经能测，哪些仍是生产级缺口。
+6. 把候选区块验证从 header-only 字段检查推进到临时重放父状态、校验 stateRoot/receiptRoot/logsBloom，并且不污染节点状态。
+7. 把文档从乐观项目介绍改成诚实工程说明，明确哪些链路已经能测，哪些仍是生产级缺口。
 
 这意味着我们现在做的是节点可信度建设：每增加一个功能，都尽量配套测试、失败回滚、root 校验和文档说明。
 
@@ -42,6 +43,7 @@ BHTE 当前已经具备以下实质进展：
 - reorg 会回滚状态、索引和交易池，而不是只改 canonical hash。
 - peer 同步区块时会验证 number、parent、tx root、receipt root、state root，并执行交易重放；root 不匹配会拒绝导入并撤销副作用。
 - `bhte_replayChain` 可以对本地 canonical blocks 做审计式重放，从 genesis snapshot 开始复现 stateRoot、transactionsRoot、receiptsRoot 和 logsBloom，并且不会改变节点当前状态。
+- `bhte_validateBlock` 现在会对候选区块做执行级验证：从父块完整 snapshot 临时重放交易，比较 stateRoot、transactionsRoot、receiptsRoot、logsBloom，然后恢复原节点状态。
 
 这些工作让 BHTE 从“接口看起来像链”向“节点能自己验证链数据”靠近了一步。
 

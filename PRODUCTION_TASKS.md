@@ -46,6 +46,10 @@ treated as globally operable infrastructure.
   for the retained canonical chain. It starts from the genesis snapshot, replays
   each block through the current state machine, compares state/transaction/
   receipt/log commitments, and restores the live node state afterward.
+- `bhte_validateBlock` now performs execution-level candidate validation instead
+  of header-only checks: it restores the parent snapshot, replays the candidate
+  block, compares state/transaction/receipt/log commitments, and restores live
+  node state without importing the block.
 - BHTE does not yet implement a full Ethereum execution layer: opcode execution,
   gas/state transition rules, contract storage semantics, MPT proof generation,
   and consensus/P2P are still incomplete.
@@ -74,7 +78,8 @@ treated as globally operable infrastructure.
   persistent canonical chain database, peer discovery, peer scoring, snap/header
   sync, and deterministic validator/miner configuration. Current status:
   bounded peer block sync with local transaction replay and root verification
-  exists for the current simplified state machine; full fork choice, peer scoring,
+  exists for the current simplified state machine; candidate block replay
+  validation exists through `bhte_validateBlock`; full fork choice, peer scoring,
   validator/miner networking, and Ethereum-compatible execution are still pending.
 - Replace BHTE selector-level contract simulation with full EVM state
   transitions: opcode execution, gas accounting, refunds, CALL/CREATE/SELFDESTRUCT

@@ -90,6 +90,8 @@ Key fixes made:
   state/receipt/log commitments, and imports only matching blocks.
 - Added `bhte_replayChain` for audit-style canonical chain replay from the
   genesis snapshot without mutating live node state.
+- Upgraded `bhte_validateBlock` from header-only checks to candidate block
+  replay validation against the parent state snapshot.
 
 ### BHTWalletPro
 

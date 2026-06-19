@@ -1823,18 +1823,128 @@ func (n *rpcNode) finalizedHeight() uint64 {
 }
 
 func (n *rpcNode) validateBlockObject(block map[string]interface{}) map[string]interface{} {
-	number := quantityFromInterface(block["number"])
-	parent := fmt.Sprint(block["parentHash"])
-	if number == 0 {
+	record, err := blockRecordFromMap(block)
+	if err != nil {
+		return map[string]interface{}{"valid": false, "message": err.Error()}
+	}
+	return n.validateBlockRecord(record)
+}
+
+func (n *rpcNode) validateBlockRecord(block blockRecord) map[string]interface{} {
+	height := parseQuantity(block.Number).Uint64()
+	if height == 0 {
 		return map[string]interface{}{"valid": false, "message": "missing block number"}
 	}
-	if number > 1 {
-		expectedParent := n.state.Canonical[number-1]
-		if expectedParent != "" && !strings.EqualFold(expectedParent, parent) {
-			return map[string]interface{}{"valid": false, "message": "parent hash mismatch"}
+	if block.Hash == "" || block.Hash == zeroHash() {
+		return map[string]interface{}{"valid": false, "height": toHex(height), "message": "missing block hash"}
+	}
+	if block.StateRoot == "" || block.StateRoot == zeroHash() {
+		return map[string]interface{}{"valid": false, "height": toHex(height), "message": "missing state root"}
+	}
+	if block.ReceiptRoot == "" {
+		return map[string]interface{}{"valid": false, "height": toHex(height), "message": "missing receipt root"}
+	}
+	if height <= 1 {
+		return map[string]interface{}{"valid": false, "height": toHex(height), "message": "genesis block replay is not supported"}
+	}
+	expectedParent := n.state.Canonical[height-1]
+	if expectedParent == "" {
+		return map[string]interface{}{"valid": false, "height": toHex(height), "message": "parent is not canonical locally"}
+	}
+	if !strings.EqualFold(block.ParentHash, expectedParent) {
+		return map[string]interface{}{
+			"valid":     false,
+			"height":    toHex(height),
+			"blockHash": block.Hash,
+			"message":   fmt.Sprintf("parent mismatch: got %s want %s", block.ParentHash, expectedParent),
 		}
 	}
-	return map[string]interface{}{"valid": true, "message": "block header accepted", "number": toHex(number)}
+	computed, err := n.replayBlockForValidation(block)
+	if err != nil {
+		return map[string]interface{}{"valid": false, "height": toHex(height), "blockHash": block.Hash, "message": err.Error()}
+	}
+	if !strings.EqualFold(block.StateRoot, computed["stateRoot"]) {
+		return validateBlockRootFailure(height, block.Hash, "stateRoot", computed["stateRoot"], block.StateRoot)
+	}
+	if block.TxRoot != "" && !strings.EqualFold(block.TxRoot, computed["transactionsRoot"]) {
+		return validateBlockRootFailure(height, block.Hash, "transactionsRoot", computed["transactionsRoot"], block.TxRoot)
+	}
+	if block.ReceiptRoot != "" && !strings.EqualFold(block.ReceiptRoot, computed["receiptsRoot"]) {
+		return validateBlockRootFailure(height, block.Hash, "receiptsRoot", computed["receiptsRoot"], block.ReceiptRoot)
+	}
+	if block.LogsBloom != "" && block.LogsBloom != zeroHash() && !strings.EqualFold(block.LogsBloom, computed["logsBloom"]) {
+		return validateBlockRootFailure(height, block.Hash, "logsBloom", computed["logsBloom"], block.LogsBloom)
+	}
+	return map[string]interface{}{
+		"valid":     true,
+		"message":   "block replay verified",
+		"number":    toHex(height),
+		"blockHash": block.Hash,
+		"computed":  computed,
+	}
+}
+
+func (n *rpcNode) replayBlockForValidation(block blockRecord) (map[string]string, error) {
+	height := parseQuantity(block.Number).Uint64()
+	parentSnapshot, ok := n.state.StateSnapshots[height-1]
+	if !ok || !parentSnapshot.Complete {
+		return nil, fmt.Errorf("complete parent state snapshot not found")
+	}
+	beforeHeight := n.state.Height
+	beforeSnapshot := n.currentStateSnapshot("", "")
+	beforeReceipts := copyReceiptMap(n.state.Receipts)
+	beforeLogs := append([]logRecord(nil), n.state.Logs...)
+	beforeTxs := append([]txRecord(nil), n.state.Txs...)
+	beforeWithdrawals := copyWithdrawalMap(n.state.Withdrawals)
+	beforeAnchors := copyAnchorMap(n.state.Anchors)
+	beforeCommits := append([]trieCommitRecord(nil), n.trieCommits...)
+	beforeReplayMode := n.replayMode
+	defer n.restoreReplayState(beforeHeight, beforeSnapshot, beforeReceipts, beforeLogs, beforeTxs, beforeWithdrawals, beforeAnchors, beforeCommits, beforeReplayMode)
+
+	n.state.Height = height - 1
+	n.restoreStateSnapshot(parentSnapshot)
+	n.state.Height = height
+	n.replayMode = true
+	minedTxs := make([]txRecord, 0, len(block.Transactions))
+	receipts := make([]receiptRecord, 0, len(block.Transactions))
+	for i, tx := range block.Transactions {
+		mined, receipt := n.applyMinedTransaction(tx, block.Hash, height, uint64(i))
+		minedTxs = append(minedTxs, mined)
+		receipts = append(receipts, receipt)
+	}
+	return map[string]string{
+		"stateRoot":        buildStateTrieFromSnapshot(n.currentStateSnapshot(block.Hash, "")).Hash().Hex(),
+		"transactionsRoot": hashJSON(minedTxs),
+		"receiptsRoot":     receiptTrieRoot(receipts),
+		"logsBloom":        blockLogsBloomHex(receipts),
+	}, nil
+}
+
+func validateBlockRootFailure(height uint64, blockHash, field, computed, expected string) map[string]interface{} {
+	return map[string]interface{}{
+		"valid":     false,
+		"height":    toHex(height),
+		"blockHash": blockHash,
+		"field":     field,
+		"computed":  computed,
+		"expected":  expected,
+		"message":   field + " mismatch",
+	}
+}
+
+func blockRecordFromMap(block map[string]interface{}) (blockRecord, error) {
+	var record blockRecord
+	if block == nil {
+		return record, fmt.Errorf("missing block object")
+	}
+	data, err := json.Marshal(block)
+	if err != nil {
+		return record, err
+	}
+	if err := json.Unmarshal(data, &record); err != nil {
+		return record, err
+	}
+	return record, nil
 }
 
 func (n *rpcNode) getTrieCommit(root string) interface{} {

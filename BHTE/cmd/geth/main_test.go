@@ -573,6 +573,56 @@ func TestSyncPeerRejectsInvalidParent(t *testing.T) {
 	}
 }
 
+func TestValidateBlockReplaysCandidateWithoutImport(t *testing.T) {
+	node := newTestNode(t)
+	peerNode := newTestNode(t)
+	mineTransfer(t, peerNode, "0x0000000000000000000000000000000000000300", "0x1")
+	candidate := peerNode.state.Blocks[1]
+	originalHeight := node.state.Height
+	originalTxCount := len(node.state.Txs)
+
+	result, err := node.call("bhte_validateBlock", mustBlockParams(t, candidate))
+	if err != nil {
+		t.Fatalf("bhte_validateBlock failed: %v", err)
+	}
+	validation := result.(map[string]interface{})
+	if validation["valid"] != true {
+		t.Fatalf("candidate block validation failed: %#v", validation)
+	}
+	computed := validation["computed"].(map[string]string)
+	if computed["stateRoot"] != candidate.StateRoot {
+		t.Fatalf("computed stateRoot = %s, want %s", computed["stateRoot"], candidate.StateRoot)
+	}
+	if node.state.Height != originalHeight || len(node.state.Txs) != originalTxCount {
+		t.Fatalf("validation imported/mutated state: height=%d txs=%d", node.state.Height, len(node.state.Txs))
+	}
+}
+
+func TestValidateBlockRejectsBadCommitmentWithoutMutation(t *testing.T) {
+	node := newTestNode(t)
+	peerNode := newTestNode(t)
+	mineTransfer(t, peerNode, "0x0000000000000000000000000000000000000300", "0x1")
+	candidate := peerNode.state.Blocks[1]
+	candidate.StateRoot = hashHex([]byte("bad-candidate-state"))
+	originalHeight := node.state.Height
+	originalTxCount := len(node.state.Txs)
+
+	result, err := node.call("bhte_validateBlock", mustBlockParams(t, candidate))
+	if err != nil {
+		t.Fatalf("bhte_validateBlock returned RPC error: %v", err)
+	}
+	validation := result.(map[string]interface{})
+	if validation["valid"] != false {
+		t.Fatalf("bad candidate block validation succeeded: %#v", validation)
+	}
+	if validation["field"] != "stateRoot" {
+		t.Fatalf("failure field = %v, want stateRoot", validation["field"])
+	}
+	if node.state.Height != originalHeight || len(node.state.Txs) != originalTxCount {
+		t.Fatalf("failed validation mutated state: height=%d txs=%d", node.state.Height, len(node.state.Txs))
+	}
+}
+
 func TestReplayChainVerifiesCanonicalBlocks(t *testing.T) {
 	node := newTestNode(t)
 	mineTransfer(t, node, "0x0000000000000000000000000000000000000300", "0x1")
@@ -635,6 +685,23 @@ func mineTransfer(t *testing.T, node *rpcNode, to, value string) {
 	if _, err := node.call("eth_sendTransaction", raw); err != nil {
 		t.Fatalf("eth_sendTransaction failed: %v", err)
 	}
+}
+
+func mustBlockParams(t *testing.T, block blockRecord) json.RawMessage {
+	t.Helper()
+	var asMap map[string]interface{}
+	data, err := json.Marshal(block)
+	if err != nil {
+		t.Fatalf("marshal block: %v", err)
+	}
+	if err := json.Unmarshal(data, &asMap); err != nil {
+		t.Fatalf("unmarshal block map: %v", err)
+	}
+	raw, err := json.Marshal([]interface{}{asMap})
+	if err != nil {
+		t.Fatalf("marshal block params: %v", err)
+	}
+	return raw
 }
 
 func newPeerRPCServer(t *testing.T, responses map[string]interface{}) *httptest.Server {
