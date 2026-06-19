@@ -222,6 +222,18 @@ type stateSnapshotRecord struct {
 	Timestamp int64                        `json:"timestamp"`
 }
 
+type blockIndexRecord struct {
+	Hash        string `json:"hash"`
+	ParentHash  string `json:"parentHash"`
+	Height      uint64 `json:"height"`
+	TotalWeight uint64 `json:"totalWeight"`
+	Canonical   bool   `json:"canonical"`
+	Validated   bool   `json:"validated"`
+	Source      string `json:"source"`
+	PeerID      string `json:"peerId,omitempty"`
+	ReceivedAt  int64  `json:"receivedAt"`
+}
+
 type nodeState struct {
 	Height         uint64                         `json:"height"`
 	Accounts       []string                       `json:"accounts"`
@@ -235,6 +247,7 @@ type nodeState struct {
 	Withdrawals    map[string]withdrawalRecord    `json:"withdrawals"`
 	Anchors        map[uint64]anchorRecord        `json:"anchors"`
 	Canonical      map[uint64]string              `json:"canonical"`
+	BlockIndex     map[string]blockIndexRecord    `json:"blockIndex"`
 	Code           map[string]string              `json:"code"`
 	Storage        map[string]map[string]string   `json:"storage"`
 	StateSnapshots map[uint64]stateSnapshotRecord `json:"stateSnapshots"`
@@ -288,6 +301,7 @@ func newRPCNode(args []string) (*rpcNode, error) {
 			Withdrawals:    map[string]withdrawalRecord{},
 			Anchors:        map[uint64]anchorRecord{},
 			Canonical:      map[uint64]string{},
+			BlockIndex:     map[string]blockIndexRecord{},
 			Code:           map[string]string{},
 			Storage:        map[string]map[string]string{},
 			StateSnapshots: map[uint64]stateSnapshotRecord{},
@@ -434,6 +448,9 @@ func (n *rpcNode) ensureState() {
 	if n.state.Canonical == nil {
 		n.state.Canonical = map[uint64]string{}
 	}
+	if n.state.BlockIndex == nil {
+		n.state.BlockIndex = map[string]blockIndexRecord{}
+	}
 	if n.state.Code == nil {
 		n.state.Code = map[string]string{}
 	}
@@ -463,7 +480,9 @@ func (n *rpcNode) ensureState() {
 		n.state.Blocks = append(n.state.Blocks, n.genesisBlock())
 	}
 	for _, block := range n.state.Blocks {
-		n.state.Canonical[parseQuantity(block.Number).Uint64()] = block.Hash
+		height := parseQuantity(block.Number).Uint64()
+		n.state.Canonical[height] = block.Hash
+		n.indexBlock(block, true, true, "local", "")
 	}
 	for _, account := range n.state.Accounts {
 		if _, ok := n.state.Balances[account]; !ok {
@@ -562,6 +581,8 @@ func (n *rpcNode) call(method string, raw json.RawMessage) (interface{}, error) 
 		return n.syncPeer(stringParam(params, 0)), nil
 	case "bhte_consensusStatus":
 		return n.consensusStatus(), nil
+	case "bhte_forkChoiceStatus":
+		return n.forkChoiceStatus(), nil
 	case "bhte_validateBlock":
 		params := parseParams(raw)
 		block, err := objectParam(params, 0)
@@ -881,6 +902,7 @@ func (n *rpcNode) minePendingBlock() blockRecord {
 	}
 	n.state.Blocks = append(n.state.Blocks, block)
 	n.state.Canonical[blockNumber] = block.Hash
+	n.indexBlock(block, true, true, "local", "")
 	n.state.Anchors[blockNumber] = anchorRecord{
 		Height:    blockNumber,
 		StateRoot: block.StateRoot,
@@ -1660,6 +1682,7 @@ func (n *rpcNode) importPeerBlock(block blockRecord) (bool, error) {
 	n.state.Height = height
 	n.state.Blocks = append(n.state.Blocks, block)
 	n.state.Canonical[height] = block.Hash
+	n.indexBlock(block, true, true, "peer", "")
 	n.state.Anchors[height] = anchorRecord{
 		Height:    height,
 		StateRoot: block.StateRoot,
@@ -1867,6 +1890,99 @@ func (n *rpcNode) consensusStatus() map[string]interface{} {
 		"peerCount":  toHex(uint64(len(n.state.Peers))),
 		"finalized":  toHex(n.finalizedHeight()),
 		"strictMode": n.strictMode,
+	}
+}
+
+func (n *rpcNode) indexBlock(block blockRecord, canonical bool, validated bool, source string, peerID string) blockIndexRecord {
+	height := parseQuantity(block.Number).Uint64()
+	parentWeight := uint64(0)
+	if parent, ok := n.state.BlockIndex[strings.ToLower(block.ParentHash)]; ok {
+		parentWeight = parent.TotalWeight
+	}
+	if height == 1 && parentWeight == 0 {
+		parentWeight = 0
+	}
+	record := blockIndexRecord{
+		Hash:        block.Hash,
+		ParentHash:  block.ParentHash,
+		Height:      height,
+		TotalWeight: parentWeight + 1,
+		Canonical:   canonical,
+		Validated:   validated,
+		Source:      source,
+		PeerID:      peerID,
+		ReceivedAt:  time.Now().Unix(),
+	}
+	n.state.BlockIndex[strings.ToLower(block.Hash)] = record
+	return record
+}
+
+func (n *rpcNode) forkChoiceStatus() map[string]interface{} {
+	best := n.bestIndexedHead()
+	canonicalHead := n.state.Blocks[len(n.state.Blocks)-1]
+	return map[string]interface{}{
+		"engine":        "bhte-dev-forkchoice",
+		"canonicalHead": n.forkChoiceHeadInfo(n.state.BlockIndex[strings.ToLower(canonicalHead.Hash)]),
+		"bestKnownHead": n.forkChoiceHeadInfo(best),
+		"finalized":     toHex(n.finalizedHeight()),
+		"knownBlocks":   toHex(uint64(len(n.state.BlockIndex))),
+		"tips":          n.forkChoiceTips(),
+		"message":       "highest validated cumulative-weight head is tracked; automatic non-canonical reorg adoption is not enabled yet",
+	}
+}
+
+func (n *rpcNode) bestIndexedHead() blockIndexRecord {
+	var best blockIndexRecord
+	for _, record := range n.state.BlockIndex {
+		if !record.Validated {
+			continue
+		}
+		if best.Hash == "" || record.TotalWeight > best.TotalWeight || (record.TotalWeight == best.TotalWeight && record.Height > best.Height) {
+			best = record
+		}
+	}
+	return best
+}
+
+func (n *rpcNode) forkChoiceTips() []map[string]interface{} {
+	children := map[string]bool{}
+	for _, record := range n.state.BlockIndex {
+		if record.ParentHash != "" && record.ParentHash != zeroHash() {
+			children[strings.ToLower(record.ParentHash)] = true
+		}
+	}
+	tips := []blockIndexRecord{}
+	for hash, record := range n.state.BlockIndex {
+		if record.Validated && !children[hash] {
+			tips = append(tips, record)
+		}
+	}
+	sort.Slice(tips, func(i, j int) bool {
+		if tips[i].TotalWeight == tips[j].TotalWeight {
+			return tips[i].Height > tips[j].Height
+		}
+		return tips[i].TotalWeight > tips[j].TotalWeight
+	})
+	out := make([]map[string]interface{}, 0, len(tips))
+	for _, tip := range tips {
+		out = append(out, n.forkChoiceHeadInfo(tip))
+	}
+	return out
+}
+
+func (n *rpcNode) forkChoiceHeadInfo(record blockIndexRecord) map[string]interface{} {
+	if record.Hash == "" {
+		return map[string]interface{}{}
+	}
+	return map[string]interface{}{
+		"hash":        record.Hash,
+		"parentHash":  record.ParentHash,
+		"height":      toHex(record.Height),
+		"totalWeight": toHex(record.TotalWeight),
+		"canonical":   record.Canonical,
+		"validated":   record.Validated,
+		"source":      record.Source,
+		"peerId":      record.PeerID,
 	}
 }
 
@@ -2591,6 +2707,11 @@ func (n *rpcNode) handleReorg(height uint64, newHash string) map[string]interfac
 	for snapshotHeight := range n.state.StateSnapshots {
 		if snapshotHeight >= height {
 			delete(n.state.StateSnapshots, snapshotHeight)
+		}
+	}
+	for hash, index := range n.state.BlockIndex {
+		if index.Canonical && index.Height >= height {
+			delete(n.state.BlockIndex, hash)
 		}
 	}
 	filteredCommits := n.trieCommits[:0]

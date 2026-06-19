@@ -53,6 +53,9 @@ treated as globally operable infrastructure.
 - BHTE peer records now include basic scoring, failure counts, and temporary
   bans. Repeated invalid sync attempts reduce score to zero and short-circuit
   further sync attempts until the ban expires.
+- BHTE now maintains a block index with height, parent hash, cumulative weight,
+  validation status, source, and canonical flags. `bhte_forkChoiceStatus`
+  exposes canonical head, best known head, known block count, and current tips.
 - BHTE does not yet implement a full Ethereum execution layer: opcode execution,
   gas/state transition rules, contract storage semantics, MPT proof generation,
   and consensus/P2P are still incomplete.
@@ -83,7 +86,8 @@ treated as globally operable infrastructure.
   bounded peer block sync with local transaction replay and root verification
   exists for the current simplified state machine; candidate block replay
   validation exists through `bhte_validateBlock`; basic peer scoring/temporary
-  banning exists; full fork choice, durable peer reputation, validator/miner
+  banning exists; a block-index/fork-choice status skeleton exists. Automatic
+  non-canonical branch adoption, durable peer reputation, validator/miner
   networking, and Ethereum-compatible execution are still pending.
 - Replace BHTE selector-level contract simulation with full EVM state
   transitions: opcode execution, gas accounting, refunds, CALL/CREATE/SELFDESTRUCT

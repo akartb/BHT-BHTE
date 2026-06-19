@@ -515,6 +515,18 @@ func TestSyncPeerImportsValidatedBlockRange(t *testing.T) {
 	if _, err := node.call("eth_getProof", proofRaw); err != nil {
 		t.Fatalf("eth_getProof on replayed peer block failed: %v", err)
 	}
+	status, err := node.call("bhte_forkChoiceStatus", nil)
+	if err != nil {
+		t.Fatalf("bhte_forkChoiceStatus failed: %v", err)
+	}
+	forkChoice := status.(map[string]interface{})
+	if forkChoice["knownBlocks"] != "0x3" {
+		t.Fatalf("knownBlocks = %v, want 0x3", forkChoice["knownBlocks"])
+	}
+	best := forkChoice["bestKnownHead"].(map[string]interface{})
+	if best["hash"] != block3.Hash || best["totalWeight"] != "0x3" {
+		t.Fatalf("unexpected best head: %#v", best)
+	}
 }
 
 func TestSyncPeerRejectsInvalidStateRoot(t *testing.T) {
@@ -721,6 +733,41 @@ func TestReplayChainRejectsCorruptStateRootWithoutMutation(t *testing.T) {
 	}
 	if node.state.Height != originalHeight || len(node.state.Txs) != originalTxCount {
 		t.Fatalf("failed replay mutated node state: height=%d txs=%d", node.state.Height, len(node.state.Txs))
+	}
+}
+
+func TestForkChoiceStatusTracksCanonicalHeadAndReorg(t *testing.T) {
+	node := newTestNode(t)
+	mineTransfer(t, node, "0x0000000000000000000000000000000000000300", "0x1")
+	mineTransfer(t, node, "0x0000000000000000000000000000000000000301", "0x2")
+	block2 := node.state.Blocks[1]
+	block3 := node.state.Blocks[2]
+
+	status, err := node.call("bhte_forkChoiceStatus", nil)
+	if err != nil {
+		t.Fatalf("bhte_forkChoiceStatus failed: %v", err)
+	}
+	forkChoice := status.(map[string]interface{})
+	head := forkChoice["canonicalHead"].(map[string]interface{})
+	if head["hash"] != block3.Hash || head["height"] != "0x3" || head["totalWeight"] != "0x3" {
+		t.Fatalf("unexpected canonical head before reorg: %#v", head)
+	}
+
+	raw, _ := json.Marshal([]interface{}{uint64(3), hashHex([]byte("replacement"))})
+	if _, err := node.call("bhte_handleReorg", raw); err != nil {
+		t.Fatalf("bhte_handleReorg failed: %v", err)
+	}
+	status, err = node.call("bhte_forkChoiceStatus", nil)
+	if err != nil {
+		t.Fatalf("bhte_forkChoiceStatus after reorg failed: %v", err)
+	}
+	forkChoice = status.(map[string]interface{})
+	head = forkChoice["canonicalHead"].(map[string]interface{})
+	if head["hash"] != block2.Hash || head["height"] != "0x2" || head["totalWeight"] != "0x2" {
+		t.Fatalf("unexpected canonical head after reorg: %#v", head)
+	}
+	if _, ok := node.state.BlockIndex[strings.ToLower(block3.Hash)]; ok {
+		t.Fatalf("reorged block survived block index: %#v", node.state.BlockIndex[strings.ToLower(block3.Hash)])
 	}
 }
 
