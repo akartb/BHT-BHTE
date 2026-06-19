@@ -1,6 +1,6 @@
 # BHC + BHTE Project Status
 
-Last verified: 2026-06-18
+Last verified: 2026-06-19
 
 ## Current Work
 
@@ -88,6 +88,8 @@ Key fixes made:
   snapshots, trie commits, and pending transactions.
 - Added peer block sync that replays remote block transactions locally, rebuilds
   state/receipt/log commitments, and imports only matching blocks.
+- Added `bhte_replayChain` for audit-style canonical chain replay from the
+  genesis snapshot without mutating live node state.
 
 ### BHTWalletPro
 

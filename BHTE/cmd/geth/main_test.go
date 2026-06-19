@@ -573,6 +573,57 @@ func TestSyncPeerRejectsInvalidParent(t *testing.T) {
 	}
 }
 
+func TestReplayChainVerifiesCanonicalBlocks(t *testing.T) {
+	node := newTestNode(t)
+	mineTransfer(t, node, "0x0000000000000000000000000000000000000300", "0x1")
+	mineTransfer(t, node, "0x0000000000000000000000000000000000000301", "0x2")
+	originalHeight := node.state.Height
+	originalTxCount := len(node.state.Txs)
+	originalLogCount := len(node.state.Logs)
+
+	result, err := node.call("bhte_replayChain", nil)
+	if err != nil {
+		t.Fatalf("bhte_replayChain failed: %v", err)
+	}
+	replay := result.(map[string]interface{})
+	if replay["valid"] != true {
+		t.Fatalf("chain replay failed: %#v", replay)
+	}
+	if replay["checked"] != 2 {
+		t.Fatalf("checked blocks = %v, want 2", replay["checked"])
+	}
+	if node.state.Height != originalHeight || len(node.state.Txs) != originalTxCount || len(node.state.Logs) != originalLogCount {
+		t.Fatalf("replay mutated node state: height=%d txs=%d logs=%d", node.state.Height, len(node.state.Txs), len(node.state.Logs))
+	}
+}
+
+func TestReplayChainRejectsCorruptStateRootWithoutMutation(t *testing.T) {
+	node := newTestNode(t)
+	mineTransfer(t, node, "0x0000000000000000000000000000000000000300", "0x1")
+	originalRoot := node.state.Blocks[1].StateRoot
+	originalHeight := node.state.Height
+	originalTxCount := len(node.state.Txs)
+	node.state.Blocks[1].StateRoot = hashHex([]byte("corrupt-state-root"))
+	defer func() {
+		node.state.Blocks[1].StateRoot = originalRoot
+	}()
+
+	result, err := node.call("bhte_replayChain", nil)
+	if err != nil {
+		t.Fatalf("bhte_replayChain returned RPC error: %v", err)
+	}
+	replay := result.(map[string]interface{})
+	if replay["valid"] != false {
+		t.Fatalf("corrupt chain replay succeeded: %#v", replay)
+	}
+	if replay["field"] != "stateRoot" {
+		t.Fatalf("failure field = %v, want stateRoot", replay["field"])
+	}
+	if node.state.Height != originalHeight || len(node.state.Txs) != originalTxCount {
+		t.Fatalf("failed replay mutated node state: height=%d txs=%d", node.state.Height, len(node.state.Txs))
+	}
+}
+
 func mineTransfer(t *testing.T, node *rpcNode, to, value string) {
 	t.Helper()
 	raw, _ := json.Marshal([]interface{}{map[string]interface{}{

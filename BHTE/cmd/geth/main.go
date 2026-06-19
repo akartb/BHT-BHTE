@@ -553,6 +553,8 @@ func (n *rpcNode) call(method string, raw json.RawMessage) (interface{}, error) 
 			return nil, err
 		}
 		return n.validateBlockObject(block), nil
+	case "bhte_replayChain":
+		return n.replayChain(), nil
 	case "eth_accounts":
 		return n.state.Accounts, nil
 	case "eth_getBalance":
@@ -1624,7 +1626,6 @@ func (n *rpcNode) importPeerBlock(block blockRecord) (bool, error) {
 }
 
 func (n *rpcNode) replayPeerBlock(block blockRecord) ([]txRecord, []receiptRecord, error) {
-	height := parseQuantity(block.Number).Uint64()
 	beforeHeight := n.state.Height
 	beforeSnapshot := n.currentStateSnapshot("", "")
 	beforeReceipts := copyReceiptMap(n.state.Receipts)
@@ -1635,17 +1636,10 @@ func (n *rpcNode) replayPeerBlock(block blockRecord) ([]txRecord, []receiptRecor
 	beforeCommits := append([]trieCommitRecord(nil), n.trieCommits...)
 	beforeReplayMode := n.replayMode
 	restore := func() {
-		n.state.Height = beforeHeight
-		n.restoreStateSnapshot(beforeSnapshot)
-		n.state.Receipts = beforeReceipts
-		n.state.Logs = beforeLogs
-		n.state.Txs = beforeTxs
-		n.state.Withdrawals = beforeWithdrawals
-		n.state.Anchors = beforeAnchors
-		n.trieCommits = beforeCommits
-		n.replayMode = beforeReplayMode
+		n.restoreReplayState(beforeHeight, beforeSnapshot, beforeReceipts, beforeLogs, beforeTxs, beforeWithdrawals, beforeAnchors, beforeCommits, beforeReplayMode)
 	}
 
+	height := parseQuantity(block.Number).Uint64()
 	n.state.Height = height
 	n.replayMode = true
 	minedTxs := make([]txRecord, 0, len(block.Transactions))
@@ -1678,6 +1672,134 @@ func (n *rpcNode) replayPeerBlock(block blockRecord) ([]txRecord, []receiptRecor
 	}
 	n.replayMode = beforeReplayMode
 	return minedTxs, receipts, nil
+}
+
+func (n *rpcNode) replayChain() map[string]interface{} {
+	if len(n.state.Blocks) == 0 {
+		return map[string]interface{}{"valid": false, "checked": 0, "message": "chain has no blocks"}
+	}
+	beforeHeight := n.state.Height
+	beforeSnapshot := n.currentStateSnapshot("", "")
+	beforeReceipts := copyReceiptMap(n.state.Receipts)
+	beforeLogs := append([]logRecord(nil), n.state.Logs...)
+	beforeTxs := append([]txRecord(nil), n.state.Txs...)
+	beforeWithdrawals := copyWithdrawalMap(n.state.Withdrawals)
+	beforeAnchors := copyAnchorMap(n.state.Anchors)
+	beforeCommits := append([]trieCommitRecord(nil), n.trieCommits...)
+	beforeReplayMode := n.replayMode
+	defer n.restoreReplayState(beforeHeight, beforeSnapshot, beforeReceipts, beforeLogs, beforeTxs, beforeWithdrawals, beforeAnchors, beforeCommits, beforeReplayMode)
+
+	genesis := n.state.Blocks[0]
+	genesisHeight := parseQuantity(genesis.Number).Uint64()
+	genesisSnapshot, ok := n.state.StateSnapshots[genesisHeight]
+	if !ok || !genesisSnapshot.Complete {
+		return map[string]interface{}{
+			"valid":   false,
+			"checked": 0,
+			"height":  toHex(genesisHeight),
+			"message": "complete genesis snapshot not found",
+		}
+	}
+	n.state.Height = genesisHeight
+	n.restoreStateSnapshot(genesisSnapshot)
+	n.state.Receipts = map[string]receiptRecord{}
+	n.state.Logs = []logRecord{}
+	n.state.Txs = []txRecord{}
+	n.state.Withdrawals = map[string]withdrawalRecord{}
+	n.state.Anchors = map[uint64]anchorRecord{}
+	n.replayMode = true
+
+	checked := 0
+	parentHash := genesis.Hash
+	for i := 1; i < len(n.state.Blocks); i++ {
+		block := n.state.Blocks[i]
+		height := parseQuantity(block.Number).Uint64()
+		if height != genesisHeight+uint64(i) {
+			return replayChainFailure(checked, height, "non-contiguous block height")
+		}
+		if !strings.EqualFold(block.ParentHash, parentHash) {
+			return map[string]interface{}{
+				"valid":     false,
+				"checked":   checked,
+				"height":    toHex(height),
+				"blockHash": block.Hash,
+				"message":   fmt.Sprintf("parent mismatch: got %s want %s", block.ParentHash, parentHash),
+			}
+		}
+		minedTxs := make([]txRecord, 0, len(block.Transactions))
+		receipts := make([]receiptRecord, 0, len(block.Transactions))
+		n.state.Height = height
+		for txIndex, tx := range block.Transactions {
+			mined, receipt := n.applyMinedTransaction(tx, block.Hash, height, uint64(txIndex))
+			minedTxs = append(minedTxs, mined)
+			receipts = append(receipts, receipt)
+		}
+		stateRoot := buildStateTrieFromSnapshot(n.currentStateSnapshot(block.Hash, "")).Hash().Hex()
+		txRoot := hashJSON(minedTxs)
+		receiptRoot := receiptTrieRoot(receipts)
+		logsBloom := blockLogsBloomHex(receipts)
+		if !strings.EqualFold(block.StateRoot, stateRoot) {
+			return replayChainRootFailure(checked, height, block.Hash, "stateRoot", stateRoot, block.StateRoot)
+		}
+		if block.TxRoot != "" && !strings.EqualFold(block.TxRoot, txRoot) {
+			return replayChainRootFailure(checked, height, block.Hash, "transactionsRoot", txRoot, block.TxRoot)
+		}
+		if block.ReceiptRoot != "" && !strings.EqualFold(block.ReceiptRoot, receiptRoot) {
+			return replayChainRootFailure(checked, height, block.Hash, "receiptsRoot", receiptRoot, block.ReceiptRoot)
+		}
+		if block.LogsBloom != "" && block.LogsBloom != zeroHash() && !strings.EqualFold(block.LogsBloom, logsBloom) {
+			return replayChainRootFailure(checked, height, block.Hash, "logsBloom", logsBloom, block.LogsBloom)
+		}
+		for receiptIndex, receipt := range receipts {
+			tx := minedTxs[receiptIndex]
+			n.state.Receipts[strings.ToLower(tx.Hash)] = receipt
+			n.state.Logs = append(n.state.Logs, receipt.Logs...)
+			n.state.Txs = append(n.state.Txs, tx)
+		}
+		checked++
+		parentHash = block.Hash
+	}
+	return map[string]interface{}{
+		"valid":    true,
+		"checked":  checked,
+		"height":   toHex(n.state.Height),
+		"bestHash": parentHash,
+		"message":  "chain replay verified",
+	}
+}
+
+func (n *rpcNode) restoreReplayState(height uint64, snapshot stateSnapshotRecord, receipts map[string]receiptRecord, logs []logRecord, txs []txRecord, withdrawals map[string]withdrawalRecord, anchors map[uint64]anchorRecord, commits []trieCommitRecord, replayMode bool) {
+	n.state.Height = height
+	n.restoreStateSnapshot(snapshot)
+	n.state.Receipts = receipts
+	n.state.Logs = logs
+	n.state.Txs = txs
+	n.state.Withdrawals = withdrawals
+	n.state.Anchors = anchors
+	n.trieCommits = commits
+	n.replayMode = replayMode
+}
+
+func replayChainFailure(checked int, height uint64, message string) map[string]interface{} {
+	return map[string]interface{}{
+		"valid":   false,
+		"checked": checked,
+		"height":  toHex(height),
+		"message": message,
+	}
+}
+
+func replayChainRootFailure(checked int, height uint64, blockHash, field, computed, expected string) map[string]interface{} {
+	return map[string]interface{}{
+		"valid":     false,
+		"checked":   checked,
+		"height":    toHex(height),
+		"blockHash": blockHash,
+		"field":     field,
+		"computed":  computed,
+		"expected":  expected,
+		"message":   field + " mismatch",
+	}
 }
 
 func (n *rpcNode) consensusStatus() map[string]interface{} {

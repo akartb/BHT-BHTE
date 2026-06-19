@@ -1,6 +1,6 @@
 # BHT/BHTE Production Readiness Tasks
 
-Last updated: 2026-06-18
+Last updated: 2026-06-19
 
 This repository is currently a compileable, partially runnable dual-chain
 prototype being actively hardened into a verifiable node system. It is not yet a
@@ -42,6 +42,10 @@ treated as globally operable infrastructure.
 - Peer-imported BHTE blocks that replay successfully now persist complete local
   state snapshots and can answer proof RPCs. Incomplete `peer-summary` snapshots
   are still recognized and proof-disabled for older or manually injected data.
+- BHTE now exposes `bhte_replayChain`, an audit-style deterministic replay check
+  for the retained canonical chain. It starts from the genesis snapshot, replays
+  each block through the current state machine, compares state/transaction/
+  receipt/log commitments, and restores the live node state afterward.
 - BHTE does not yet implement a full Ethereum execution layer: opcode execution,
   gas/state transition rules, contract storage semantics, MPT proof generation,
   and consensus/P2P are still incomplete.
@@ -88,7 +92,9 @@ treated as globally operable infrastructure.
   joining far behind, and validation of replacement branch state during deep
   reorgs.
 - Add deterministic replay tests that rebuild chain state from genesis and
-  compare state roots across nodes.
+  compare state roots across nodes. Current status: single-node canonical replay
+  verification exists through `bhte_replayChain`; cross-node replay and full EVM
+  compatibility vectors are still pending.
 
 ## P0: Bridge and Cross-Chain Safety
 
