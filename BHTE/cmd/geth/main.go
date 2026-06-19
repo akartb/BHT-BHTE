@@ -253,6 +253,17 @@ type stateDBRecord struct {
 	UpdatedAt      int64                          `json:"updatedAt"`
 }
 
+type historyDBRecord struct {
+	Version     int                         `json:"version"`
+	PendingTxs  []txRecord                  `json:"pendingTransactions"`
+	Txs         []txRecord                  `json:"transactions"`
+	Receipts    map[string]receiptRecord    `json:"receipts"`
+	Logs        []logRecord                 `json:"logs"`
+	Withdrawals map[string]withdrawalRecord `json:"withdrawals"`
+	Anchors     map[uint64]anchorRecord     `json:"anchors"`
+	UpdatedAt   int64                       `json:"updatedAt"`
+}
+
 type nodeState struct {
 	Height         uint64                         `json:"height"`
 	Accounts       []string                       `json:"accounts"`
@@ -283,6 +294,7 @@ type rpcNode struct {
 	stateFile        string
 	chainFile        string
 	stateDBFile      string
+	historyFile      string
 	trieFile         string
 	trieCommits      []trieCommitRecord
 	bridgeAddress    string
@@ -385,10 +397,12 @@ func newRPCNode(args []string) (*rpcNode, error) {
 	node.stateFile = filepath.Join(node.dataDir, "bhte_state.json")
 	node.chainFile = filepath.Join(node.dataDir, "bhte_chain.json")
 	node.stateDBFile = filepath.Join(node.dataDir, "bhte_state_db.json")
+	node.historyFile = filepath.Join(node.dataDir, "bhte_history.json")
 	node.trieFile = filepath.Join(node.dataDir, "bhte_trie_nodes.json")
 	node.load()
 	node.loadChainDB()
 	node.loadStateDB()
+	node.loadHistoryDB()
 	node.loadTrieDB()
 	node.ensureState()
 	return node, nil
@@ -469,6 +483,35 @@ func (n *rpcNode) loadStateDB() {
 	}
 	if stateDB.StateSnapshots != nil {
 		n.state.StateSnapshots = stateDB.StateSnapshots
+	}
+}
+
+func (n *rpcNode) loadHistoryDB() {
+	data, err := os.ReadFile(n.historyFile)
+	if err != nil {
+		return
+	}
+	var history historyDBRecord
+	if json.Unmarshal(data, &history) != nil {
+		return
+	}
+	if history.PendingTxs != nil {
+		n.state.PendingTxs = history.PendingTxs
+	}
+	if history.Txs != nil {
+		n.state.Txs = history.Txs
+	}
+	if history.Receipts != nil {
+		n.state.Receipts = history.Receipts
+	}
+	if history.Logs != nil {
+		n.state.Logs = history.Logs
+	}
+	if history.Withdrawals != nil {
+		n.state.Withdrawals = history.Withdrawals
+	}
+	if history.Anchors != nil {
+		n.state.Anchors = history.Anchors
 	}
 }
 
@@ -577,11 +620,32 @@ func (n *rpcNode) save() {
 	}
 	n.saveChainDB()
 	n.saveStateDB()
+	n.saveHistoryDB()
 	if n.trieFile != "" {
 		trieData, err := json.MarshalIndent(n.trieCommits, "", "  ")
 		if err == nil {
 			_ = os.WriteFile(n.trieFile, trieData, 0o600)
 		}
+	}
+}
+
+func (n *rpcNode) saveHistoryDB() {
+	if n.historyFile == "" {
+		return
+	}
+	history := historyDBRecord{
+		Version:     1,
+		PendingTxs:  n.state.PendingTxs,
+		Txs:         n.state.Txs,
+		Receipts:    n.state.Receipts,
+		Logs:        n.state.Logs,
+		Withdrawals: n.state.Withdrawals,
+		Anchors:     n.state.Anchors,
+		UpdatedAt:   time.Now().Unix(),
+	}
+	data, err := json.MarshalIndent(history, "", "  ")
+	if err == nil {
+		_ = os.WriteFile(n.historyFile, data, 0o600)
 	}
 }
 

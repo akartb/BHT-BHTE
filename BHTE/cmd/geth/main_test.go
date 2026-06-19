@@ -91,6 +91,58 @@ func TestStateDBPersistsAndReloadsWithoutLegacyStateFile(t *testing.T) {
 	}
 }
 
+func TestHistoryDBPersistsAndReloadsWithoutLegacyStateFile(t *testing.T) {
+	dir := t.TempDir()
+	node, err := newRPCNode([]string{"--datadir", dir, "--dev-insecure"})
+	if err != nil {
+		t.Fatalf("newRPCNode failed: %v", err)
+	}
+	from := node.state.Accounts[0]
+	to := "0x0000000000000000000000000000000000000500"
+	raw, _ := json.Marshal([]interface{}{map[string]interface{}{
+		"from":  from,
+		"to":    to,
+		"value": "0x2a",
+		"gas":   "0x5208",
+		"data":  "0x6057361d",
+	}})
+	txHashResult, err := node.call("eth_sendTransaction", raw)
+	if err != nil {
+		t.Fatalf("eth_sendTransaction failed: %v", err)
+	}
+	txHash := txHashResult.(string)
+	node.submitAnchor(map[string]interface{}{
+		"height":    node.state.Height,
+		"stateRoot": node.state.Blocks[len(node.state.Blocks)-1].StateRoot,
+		"blockHash": node.state.Blocks[len(node.state.Blocks)-1].Hash,
+		"txHash":    txHash,
+	})
+	node.save()
+	if _, err := os.Stat(node.historyFile); err != nil {
+		t.Fatalf("history DB was not written: %v", err)
+	}
+	if err := os.Remove(node.stateFile); err != nil {
+		t.Fatalf("remove legacy state file: %v", err)
+	}
+
+	reloaded, err := newRPCNode([]string{"--datadir", dir, "--dev-insecure"})
+	if err != nil {
+		t.Fatalf("reload newRPCNode failed: %v", err)
+	}
+	if len(reloaded.state.Txs) != 1 || reloaded.state.Txs[0].Hash != txHash {
+		t.Fatalf("reloaded tx history mismatch: %#v", reloaded.state.Txs)
+	}
+	if _, ok := reloaded.state.Receipts[strings.ToLower(txHash)]; !ok {
+		t.Fatalf("reloaded receipt missing for %s", txHash)
+	}
+	if len(reloaded.state.Anchors) == 0 {
+		t.Fatal("reloaded anchors missing")
+	}
+	if len(reloaded.state.PendingTxs) != 0 {
+		t.Fatalf("unexpected reloaded pending txs: %#v", reloaded.state.PendingTxs)
+	}
+}
+
 func TestEthGetProofUsesStateAndStorageTries(t *testing.T) {
 	node := newTestNode(t)
 	addr := "0x0000000000000000000000000000000000000201"

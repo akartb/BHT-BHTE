@@ -100,6 +100,9 @@ Key fixes made:
   compatibility.
 - Added `bhte_state_db.json` as a separate state database file for accounts,
   balances, nonces, code, storage, and state snapshots.
+- Added `bhte_history.json` as a separate history/index database file for
+  pending transactions, transaction history, receipts, logs, withdrawals, and
+  anchors.
 
 ### BHTWalletPro
 
