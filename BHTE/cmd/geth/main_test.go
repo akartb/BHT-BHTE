@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -19,6 +20,35 @@ func newTestNode(t *testing.T) *rpcNode {
 		t.Fatalf("newRPCNode failed: %v", err)
 	}
 	return node
+}
+
+func TestChainDBPersistsAndReloadsCanonicalIndex(t *testing.T) {
+	dir := t.TempDir()
+	node, err := newRPCNode([]string{"--datadir", dir, "--dev-insecure"})
+	if err != nil {
+		t.Fatalf("newRPCNode failed: %v", err)
+	}
+	mineTransfer(t, node, "0x0000000000000000000000000000000000000300", "0x1")
+	block2 := node.state.Blocks[1]
+	node.save()
+	if _, err := os.Stat(node.chainFile); err != nil {
+		t.Fatalf("chain DB was not written: %v", err)
+	}
+
+	reloaded, err := newRPCNode([]string{"--datadir", dir, "--dev-insecure"})
+	if err != nil {
+		t.Fatalf("reload newRPCNode failed: %v", err)
+	}
+	if reloaded.state.Height != 2 {
+		t.Fatalf("reloaded height = %d, want 2", reloaded.state.Height)
+	}
+	if reloaded.state.Canonical[2] != block2.Hash {
+		t.Fatalf("reloaded canonical[2] = %s, want %s", reloaded.state.Canonical[2], block2.Hash)
+	}
+	index := reloaded.state.BlockIndex[strings.ToLower(block2.Hash)]
+	if index.Hash != block2.Hash || !index.Canonical || !index.Validated || index.TotalWeight != 2 {
+		t.Fatalf("reloaded block index mismatch: %#v", index)
+	}
 }
 
 func TestEthGetProofUsesStateAndStorageTries(t *testing.T) {

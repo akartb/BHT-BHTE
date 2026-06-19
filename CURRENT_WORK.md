@@ -30,7 +30,8 @@ Last updated: 2026-06-19
 6. 把候选区块验证从 header-only 字段检查推进到临时重放父状态、校验 stateRoot/receiptRoot/logsBloom，并且不污染节点状态。
 7. 给 peer sync 加入基础评分和临时封禁，避免坏 peer 反复提供无效区块时被无限重试。
 8. 引入 block index/fork-choice status 骨架，从“只看本地高度”推进到“跟踪已知块、累计权重、canonical head 和候选 tips”。
-9. 把文档从乐观项目介绍改成诚实工程说明，明确哪些链路已经能测，哪些仍是生产级缺口。
+9. 把 blocks/canonical/block index 从单体状态文件里拆出独立 `bhte_chain.json`，开始向正式 chain database 布局迁移。
+10. 把文档从乐观项目介绍改成诚实工程说明，明确哪些链路已经能测，哪些仍是生产级缺口。
 
 这意味着我们现在做的是节点可信度建设：每增加一个功能，都尽量配套测试、失败回滚、root 校验和文档说明。
 
@@ -48,6 +49,7 @@ BHTE 当前已经具备以下实质进展：
 - `bhte_validateBlock` 现在会对候选区块做执行级验证：从父块完整 snapshot 临时重放交易，比较 stateRoot、transactionsRoot、receiptsRoot、logsBloom，然后恢复原节点状态。
 - peer 记录现在包含 score/failures/bannedUntil；同步失败会扣分，重复提供无效区块会被临时封禁，成功同步会恢复健康分数。
 - `bhte_forkChoiceStatus` 现在会返回 canonical head、best known head、known block 数、累计权重和 tips；目前仍是 dev fork-choice 骨架，还没有自动采用非 canonical 分支。
+- 节点现在会写入独立 `bhte_chain.json`，用于持久化 blocks、canonical map 和 block index；加载时会优先恢复这部分链数据库，同时保留旧状态文件兼容。
 
 这些工作让 BHTE 从“接口看起来像链”向“节点能自己验证链数据”靠近了一步。
 

@@ -56,6 +56,10 @@ treated as globally operable infrastructure.
 - BHTE now maintains a block index with height, parent hash, cumulative weight,
   validation status, source, and canonical flags. `bhte_forkChoiceStatus`
   exposes canonical head, best known head, known block count, and current tips.
+- BHTE now writes an independent `bhte_chain.json` chain database for blocks,
+  canonical mappings, and block index data. This is the first split away from
+  the monolithic state JSON; account state and snapshots still need a production
+  database/trie backend.
 - BHTE does not yet implement a full Ethereum execution layer: opcode execution,
   gas/state transition rules, contract storage semantics, MPT proof generation,
   and consensus/P2P are still incomplete.
@@ -86,9 +90,10 @@ treated as globally operable infrastructure.
   bounded peer block sync with local transaction replay and root verification
   exists for the current simplified state machine; candidate block replay
   validation exists through `bhte_validateBlock`; basic peer scoring/temporary
-  banning exists; a block-index/fork-choice status skeleton exists. Automatic
-  non-canonical branch adoption, durable peer reputation, validator/miner
-  networking, and Ethereum-compatible execution are still pending.
+  banning exists; a block-index/fork-choice status skeleton exists; chain data
+  now persists separately to `bhte_chain.json`. Automatic non-canonical branch
+  adoption, durable peer reputation, validator/miner networking, and
+  Ethereum-compatible execution are still pending.
 - Replace BHTE selector-level contract simulation with full EVM state
   transitions: opcode execution, gas accounting, refunds, CALL/CREATE/SELFDESTRUCT
   semantics, storage/account trie updates, bloom filters, and receipt roots.
@@ -99,8 +104,9 @@ treated as globally operable infrastructure.
   trie commit lookup, node retrieval, and receipt verification from persisted
   nodes exists. Single-log proof helpers exist as local receipt-proof plus
   log-content verification. Historical account/storage proof snapshots exist for
-  retained locally executed and successfully replayed peer blocks. Incomplete
-  peer summaries remain proof-disabled. Remaining gaps: long-term database
+  retained locally executed and successfully replayed peer blocks. Blocks,
+  canonical mappings, and block index now also persist to `bhte_chain.json`.
+  Incomplete peer summaries remain proof-disabled. Remaining gaps: real database
   storage beyond JSON files, pruning-safe node retention, state-sync for nodes
   joining far behind, and validation of replacement branch state during deep
   reorgs.

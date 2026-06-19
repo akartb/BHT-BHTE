@@ -95,6 +95,9 @@ Key fixes made:
 - Added basic peer scoring and temporary bans for repeated invalid sync attempts.
 - Added a BHTE block index and `bhte_forkChoiceStatus` so the node can report
   canonical head, best known head, cumulative weight, known blocks, and tips.
+- Added `bhte_chain.json` as a separate chain database file for blocks,
+  canonical mappings, and block index data, while keeping old state JSON
+  compatibility.
 
 ### BHTWalletPro
 

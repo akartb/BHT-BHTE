@@ -234,6 +234,14 @@ type blockIndexRecord struct {
 	ReceivedAt  int64  `json:"receivedAt"`
 }
 
+type chainDBRecord struct {
+	Version    int                         `json:"version"`
+	Blocks     []blockRecord               `json:"blocks"`
+	Canonical  map[uint64]string           `json:"canonical"`
+	BlockIndex map[string]blockIndexRecord `json:"blockIndex"`
+	UpdatedAt  int64                       `json:"updatedAt"`
+}
+
 type nodeState struct {
 	Height         uint64                         `json:"height"`
 	Accounts       []string                       `json:"accounts"`
@@ -262,6 +270,7 @@ type rpcNode struct {
 	state            nodeState
 	server           *http.Server
 	stateFile        string
+	chainFile        string
 	trieFile         string
 	trieCommits      []trieCommitRecord
 	bridgeAddress    string
@@ -362,8 +371,10 @@ func newRPCNode(args []string) (*rpcNode, error) {
 		return nil, err
 	}
 	node.stateFile = filepath.Join(node.dataDir, "bhte_state.json")
+	node.chainFile = filepath.Join(node.dataDir, "bhte_chain.json")
 	node.trieFile = filepath.Join(node.dataDir, "bhte_trie_nodes.json")
 	node.load()
+	node.loadChainDB()
 	node.loadTrieDB()
 	node.ensureState()
 	return node, nil
@@ -397,6 +408,24 @@ func (n *rpcNode) load() {
 	var state nodeState
 	if json.Unmarshal(data, &state) == nil && len(state.Accounts) > 0 {
 		n.state = state
+	}
+}
+
+func (n *rpcNode) loadChainDB() {
+	data, err := os.ReadFile(n.chainFile)
+	if err != nil {
+		return
+	}
+	var chain chainDBRecord
+	if json.Unmarshal(data, &chain) != nil || len(chain.Blocks) == 0 {
+		return
+	}
+	n.state.Blocks = chain.Blocks
+	if chain.Canonical != nil {
+		n.state.Canonical = chain.Canonical
+	}
+	if chain.BlockIndex != nil {
+		n.state.BlockIndex = chain.BlockIndex
 	}
 }
 
@@ -503,11 +532,29 @@ func (n *rpcNode) save() {
 	if err == nil {
 		_ = os.WriteFile(n.stateFile, data, 0o600)
 	}
+	n.saveChainDB()
 	if n.trieFile != "" {
 		trieData, err := json.MarshalIndent(n.trieCommits, "", "  ")
 		if err == nil {
 			_ = os.WriteFile(n.trieFile, trieData, 0o600)
 		}
+	}
+}
+
+func (n *rpcNode) saveChainDB() {
+	if n.chainFile == "" {
+		return
+	}
+	chain := chainDBRecord{
+		Version:    1,
+		Blocks:     n.state.Blocks,
+		Canonical:  n.state.Canonical,
+		BlockIndex: n.state.BlockIndex,
+		UpdatedAt:  time.Now().Unix(),
+	}
+	data, err := json.MarshalIndent(chain, "", "  ")
+	if err == nil {
+		_ = os.WriteFile(n.chainFile, data, 0o600)
 	}
 }
 
@@ -1902,6 +1949,28 @@ func (n *rpcNode) indexBlock(block blockRecord, canonical bool, validated bool, 
 	if height == 1 && parentWeight == 0 {
 		parentWeight = 0
 	}
+	key := strings.ToLower(block.Hash)
+	if existing, ok := n.state.BlockIndex[key]; ok {
+		existing.Hash = block.Hash
+		existing.ParentHash = block.ParentHash
+		existing.Height = height
+		if existing.TotalWeight == 0 || existing.TotalWeight < parentWeight+1 {
+			existing.TotalWeight = parentWeight + 1
+		}
+		existing.Canonical = existing.Canonical || canonical
+		existing.Validated = existing.Validated || validated
+		if existing.Source == "" {
+			existing.Source = source
+		}
+		if existing.PeerID == "" {
+			existing.PeerID = peerID
+		}
+		if existing.ReceivedAt == 0 {
+			existing.ReceivedAt = time.Now().Unix()
+		}
+		n.state.BlockIndex[key] = existing
+		return existing
+	}
 	record := blockIndexRecord{
 		Hash:        block.Hash,
 		ParentHash:  block.ParentHash,
@@ -1913,7 +1982,7 @@ func (n *rpcNode) indexBlock(block blockRecord, canonical bool, validated bool, 
 		PeerID:      peerID,
 		ReceivedAt:  time.Now().Unix(),
 	}
-	n.state.BlockIndex[strings.ToLower(block.Hash)] = record
+	n.state.BlockIndex[key] = record
 	return record
 }
 
