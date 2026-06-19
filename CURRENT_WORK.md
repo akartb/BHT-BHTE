@@ -33,7 +33,8 @@ Last updated: 2026-06-19
 9. 把 blocks/canonical/block index 从单体状态文件里拆出独立 `bhte_chain.json`，开始向正式 chain database 布局迁移。
 10. 把 accounts/balances/nonces/code/storage/snapshots 从单体状态文件里拆出独立 `bhte_state_db.json`，开始向正式 state database 布局迁移。
 11. 把 pending/tx history/receipts/logs/withdrawals/anchors 从单体状态文件里拆出独立 `bhte_history.json`，开始向交易历史和桥接事件索引迁移。
-12. 把文档从乐观项目介绍改成诚实工程说明，明确哪些链路已经能测，哪些仍是生产级缺口。
+12. 把 JSON DB 写入改成 staged replacement，先写 `.tmp` 再替换目标文件，降低中途写坏主文件的风险。
+13. 把文档从乐观项目介绍改成诚实工程说明，明确哪些链路已经能测，哪些仍是生产级缺口。
 
 这意味着我们现在做的是节点可信度建设：每增加一个功能，都尽量配套测试、失败回滚、root 校验和文档说明。
 
@@ -54,6 +55,7 @@ BHTE 当前已经具备以下实质进展：
 - 节点现在会写入独立 `bhte_chain.json`，用于持久化 blocks、canonical map 和 block index；加载时会优先恢复这部分链数据库，同时保留旧状态文件兼容。
 - 节点现在也会写入独立 `bhte_state_db.json`，用于持久化 accounts、balances、nonces、code、storage 和 state snapshots；即使旧 `bhte_state.json` 缺失，也可以从 chain/state DB 恢复核心链状态。
 - 节点现在还会写入独立 `bhte_history.json`，用于持久化 pending txs、交易历史、receipts、logs、withdrawals 和 anchors；这为钱包历史、桥接事件 watcher 和索引服务继续拆分做准备。
+- 这些 JSON DB 现在通过 staged replacement 写入，避免直接覆盖主文件；这仍不是 WAL/事务数据库，但比裸 `WriteFile` 更稳。
 
 这些工作让 BHTE 从“接口看起来像链”向“节点能自己验证链数据”靠近了一步。
 

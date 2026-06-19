@@ -68,6 +68,9 @@ treated as globally operable infrastructure.
   pending transactions, mined transaction history, receipts, logs, withdrawals,
   and anchors. This separates wallet/history/bridge index data from the legacy
   state file, but it is still JSON-backed.
+- BHTE JSON database files now use staged replacement writes through temporary
+  files before replacing the target file. This reduces partial-write corruption
+  risk, but it is not a substitute for WAL/transactions.
 - BHTE does not yet implement a full Ethereum execution layer: opcode execution,
   gas/state transition rules, contract storage semantics, MPT proof generation,
   and consensus/P2P are still incomplete.

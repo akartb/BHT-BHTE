@@ -103,6 +103,8 @@ Key fixes made:
 - Added `bhte_history.json` as a separate history/index database file for
   pending transactions, transaction history, receipts, logs, withdrawals, and
   anchors.
+- Switched BHTE JSON database writes to staged temporary-file replacement to
+  reduce direct overwrite corruption risk.
 
 ### BHTWalletPro
 

@@ -614,18 +614,12 @@ func (n *rpcNode) ensureState() {
 }
 
 func (n *rpcNode) save() {
-	data, err := json.MarshalIndent(n.state, "", "  ")
-	if err == nil {
-		_ = os.WriteFile(n.stateFile, data, 0o600)
-	}
+	_ = writeJSONFile(n.stateFile, n.state)
 	n.saveChainDB()
 	n.saveStateDB()
 	n.saveHistoryDB()
 	if n.trieFile != "" {
-		trieData, err := json.MarshalIndent(n.trieCommits, "", "  ")
-		if err == nil {
-			_ = os.WriteFile(n.trieFile, trieData, 0o600)
-		}
+		_ = writeJSONFile(n.trieFile, n.trieCommits)
 	}
 }
 
@@ -643,10 +637,7 @@ func (n *rpcNode) saveHistoryDB() {
 		Anchors:     n.state.Anchors,
 		UpdatedAt:   time.Now().Unix(),
 	}
-	data, err := json.MarshalIndent(history, "", "  ")
-	if err == nil {
-		_ = os.WriteFile(n.historyFile, data, 0o600)
-	}
+	_ = writeJSONFile(n.historyFile, history)
 }
 
 func (n *rpcNode) saveStateDB() {
@@ -663,10 +654,7 @@ func (n *rpcNode) saveStateDB() {
 		StateSnapshots: n.state.StateSnapshots,
 		UpdatedAt:      time.Now().Unix(),
 	}
-	data, err := json.MarshalIndent(stateDB, "", "  ")
-	if err == nil {
-		_ = os.WriteFile(n.stateDBFile, data, 0o600)
-	}
+	_ = writeJSONFile(n.stateDBFile, stateDB)
 }
 
 func (n *rpcNode) saveChainDB() {
@@ -680,10 +668,26 @@ func (n *rpcNode) saveChainDB() {
 		BlockIndex: n.state.BlockIndex,
 		UpdatedAt:  time.Now().Unix(),
 	}
-	data, err := json.MarshalIndent(chain, "", "  ")
-	if err == nil {
-		_ = os.WriteFile(n.chainFile, data, 0o600)
+	_ = writeJSONFile(n.chainFile, chain)
+}
+
+func writeJSONFile(path string, value interface{}) error {
+	data, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return err
 	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(path)
+		if renameErr := os.Rename(tmp, path); renameErr != nil {
+			_ = os.Remove(tmp)
+			return renameErr
+		}
+	}
+	return nil
 }
 
 func (n *rpcNode) handleRPC(w http.ResponseWriter, r *http.Request) {

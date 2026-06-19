@@ -22,6 +22,30 @@ func newTestNode(t *testing.T) *rpcNode {
 	return node
 }
 
+func TestWriteJSONFileUsesStagedReplacement(t *testing.T) {
+	path := t.TempDir() + "\\db.json"
+	if err := writeJSONFile(path, map[string]interface{}{"version": 1, "name": "initial"}); err != nil {
+		t.Fatalf("writeJSONFile initial failed: %v", err)
+	}
+	if err := writeJSONFile(path, map[string]interface{}{"version": 2, "name": "updated"}); err != nil {
+		t.Fatalf("writeJSONFile update failed: %v", err)
+	}
+	if _, err := os.Stat(path + ".tmp"); !os.IsNotExist(err) {
+		t.Fatalf("temporary JSON file survived replacement: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read JSON file: %v", err)
+	}
+	var decoded map[string]interface{}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("written JSON is invalid: %v", err)
+	}
+	if decoded["name"] != "updated" {
+		t.Fatalf("unexpected JSON content: %#v", decoded)
+	}
+}
+
 func TestChainDBPersistsAndReloadsCanonicalIndex(t *testing.T) {
 	dir := t.TempDir()
 	node, err := newRPCNode([]string{"--datadir", dir, "--dev-insecure"})
